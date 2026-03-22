@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+artifacts/
+data/daily/
+data/*.parquet
+!data/.gitkeep
+
+.venv/
+.pytest_cache/

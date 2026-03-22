@@ -1,0 +1,253 @@
+# 默认配置文件
+# 说明：
+# 1. 这是“可直接运行”的默认模板，重点是把路径和流程说明清楚。
+# 2. 真实全市场训练时，一般只需要改 paths、download 和少量 inference 字段。
+# 3. 如果你已经有市场级 parquet，可直接设置 paths.reference_merged_parquet，跳过抓数阶段。
+
+paths:
+  # 单票原始 parquet 目录。download_stock.py 的默认输出位置。
+  raw_daily_dir: data/daily
+
+  # 合并后的市场级 parquet 文件。
+  merged_parquet: data/market_daily.parquet
+
+  # bundle 缓存目录。prepare 后会在这里生成 *.pt 和 summary.json。
+  cache_dir: artifacts/cache
+
+  # 模型落盘目录。
+  models_dir: artifacts/models
+
+  # 预测归档目录。每次 predict 或 daily 都会创建一个子目录。
+  predictions_dir: artifacts/predictions
+
+  # 历史验证目录。validate 会写入 history.csv。
+  validation_dir: artifacts/validation
+
+  # 全部命令默认日志目录。若 logging.write_file=true，会自动写 <command>.log。
+  logs_dir: artifacts/logs
+
+  # 训练和评估指标目录。
+  metrics_dir: artifacts/metrics
+
+  # 可选的外部市场级 parquet。
+  # 如果本仓库内没有 merged_parquet，但这里指向了有效文件，
+  # prepare/train/predict 会优先使用这个参考文件。
+  reference_merged_parquet: null
+
+logging:
+  # 全局日志级别。所有 CLI 子命令和 daily 内部阶段都使用这一套级别。
+  # 排查抓数或训练细节时可切到 DEBUG。
+  level: INFO
+
+  # 是否同时输出到终端。
+  console: true
+
+  # 是否默认写入 paths.logs_dir/<command>.log。
+  # 例如 download.log / train.log / predict.log / daily.log。
+  write_file: true
+
+  # 可选的统一日志文件。
+  # null 表示按命令自动分文件；若设成具体路径，则该次命令的所有主流程日志都写这个文件。
+  log_file: null
+
+download:
+  # 下载起始日期。第一次抓全量时会用到。
+  start_date: "1990-01-01"
+
+  # 下载终止日期。null 表示自动使用最近交易日。
+  end_date: null
+
+  # 复权方式：none / qfq / hfq。
+  adjust: hfq
+
+  # 下载线程数。默认建议保持 1，先稳住而不是追求速度。
+  max_workers: 1
+
+  # 本机线程上限。即使 max_workers 更高，也会被这里截断。
+  host_max_workers: 1
+
+  # 单请求最大重试次数。
+  max_retries: 1
+
+  # 单请求超时时间，单位秒。
+  timeout: 20.0
+
+  # 每次 HTTP 请求之间的最小间隔秒数。
+  request_interval: 10
+
+  # 额外随机等待，降低固定节奏访问风险。
+  request_jitter: 0.2
+
+  # 请求失败后的基础退避秒数。
+  retry_sleep: 1.5
+
+  # daily 增量更新时，会从当前最新日期向前回退这么多天重新刷新。
+  refresh_lookback_days: 5
+
+  # 是否打乱股票顺序下载，避免总是按固定顺序访问。
+  shuffle_symbols: true
+
+  # 调试用。只处理前 N 只股票。
+  limit: null
+
+  # 股票列表文件路径。可以是 txt/csv/json。
+  # 若为 null，则使用脚本内部默认静态股票池，或 extra_symbols。
+  symbols_file: null
+
+  # 额外指定的股票列表，例如 ["000001.SZ", "600519.SH"]。
+  extra_symbols: []
+
+  # 可选的 jsonl 报告文件。每只股票一行结果，最适合排查被拒绝和空返回。
+  # 默认写入 logs 目录，便于和 download.log 一起排查。
+  report_file: artifacts/logs/download_report.jsonl
+
+data:
+  # 当前 bundle 和模型的版本名。建议每轮稳定方案使用不同名字。
+  cache_version: deploy_candidate_v1_baseline_champion
+
+  # 至少上市多少个交易日后，该股票样本才进入训练。
+  min_listed_days: 120
+
+  # 某天横截面至少要有多少只股票，才保留这一天。
+  min_daily_universe: 100
+
+  # 目标收益裁剪区间。过大值会被截断，减少极端样本影响。
+  target_clip:
+    - -0.25
+    - 0.25
+
+  # Walk-forward 切分参数。默认 5y train + 1y valid + 1y holdout。
+  train_days: 1260
+  valid_days: 252
+  holdout_days: 252
+  step_days: 252
+
+  # 是否滚动训练窗。true 表示用最近 train_days；false 表示从头累积。
+  rolling_train: true
+
+  # 原始特征截断范围，避免极值污染。
+  feature_clip: 20.0
+
+  # 横截面标准化后再截断的范围。
+  normalized_clip: 5.0
+
+  # 固定特征工程窗口。
+  ret_windows: [2, 3, 5, 10, 20, 60]
+  ma_windows: [5, 10, 20, 60]
+  vol_windows: [5, 10, 20, 60]
+  flow_windows: [5, 20, 60]
+
+  # 训练时的前排监督桶参数。最终评估仍然是 top1。
+  portfolio_top_fraction: 0.005
+  portfolio_min_k: 4
+  portfolio_max_k: 12
+  portfolio_rank_decay: 1.0
+
+  # 最终评估 top_k。当前固定为 1。
+  eval_top_k: 1
+
+  # robust_score 中的回撤惩罚权重。
+  robust_drawdown_weight: 0.01
+
+  # selection_score 中 alpha 和 hit 的辅助权重。
+  selection_alpha_weight: 0.25
+  selection_hit_weight: 0.05
+
+  # 标签定义：
+  # target_t = open[t + exit_offset_days] / open[t + entry_offset_days] - 1
+  entry_offset_days: 1
+  exit_offset_days: 2
+
+model:
+  # 主干隐藏层。
+  hidden_dims: [384, 192, 96]
+
+  # dropout 比例。
+  dropout: 0.2
+
+  # 激活函数。支持 gelu/relu/silu/tanh。
+  activation: gelu
+
+  # 是否启用 LayerNorm。
+  use_layernorm: false
+
+  # 每个 stage 后的残差块数。
+  num_residual_blocks: 3
+
+  # 线性 IC 头与非线性头的混合权重。
+  linear_head_mix: 0.6
+
+  # 是否冻结线性 IC 头。
+  freeze_linear_head: true
+
+  # shortlist rerank 参数。
+  shortlist_size: 64
+  rerank_dim: 96
+  rerank_blocks: 2
+  rerank_heads: 8
+  rerank_mix: 0.35
+  shortlist_target_blend: 0.75
+
+training:
+  # 随机种子。
+  seed: 42
+
+  # 最大 epoch 数。
+  epochs: 18
+
+  # 每个 batch 由多少个交易日组成。
+  batch_days: 20
+
+  # AdamW 参数。
+  learning_rate: 0.0005
+  weight_decay: 0.0005
+
+  # 标签平滑强度。
+  label_smoothing: 0.02
+
+  # 梯度裁剪阈值。
+  grad_clip: 1.0
+
+  # 早停耐心值。
+  early_stopping_patience: 4
+
+  # 前排正样本比例。
+  positive_fraction: 0.08
+
+  # 每天抽多少组 pairwise 排序样本。
+  pair_samples_per_day: 64
+
+  # pairwise 更关注前排样本的比例。
+  pair_focus_fraction: 0.2
+
+  # listwise 监督与扩展目标的混合权重。
+  listwise_target_blend: 0.9
+
+  # 前排监督桶的扩展尺度。
+  top_bucket_expansion_scale: 12.0
+
+  # 各损失项权重。
+  listwise_loss_weight: 0.4808326891
+  pairwise_loss_weight: 0.1791337469
+  huber_loss_weight: 0.1319932872
+  binary_loss_weight: 0.0471404597
+  winner_loss_weight: 0.1039352856
+  rerank_listwise_loss_weight: 0.0569645315
+
+  # 汇总 research_score 时，最近 holdout 取多少个 fold。
+  recent_holdout_folds: 5
+
+  # research_score 的加权组成。
+  research_holdout_weight: 0.5
+  research_recent_weight: 0.3
+  research_valid_weight: 0.2
+
+inference:
+  # 实际选股数量。当前部署口径默认是 1。
+  top_k: 1
+
+  # 每次归档保存多少个候选。
+  archive_top_n: 10
+
+  # 预测方案名称，会写入归档文件。
+  prediction_name: deploy_candidate_v1_baseline_champion

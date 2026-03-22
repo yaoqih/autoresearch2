@@ -1,0 +1,24 @@
+[project]
+name = "quant-impl"
+version = "0.1.0"
+description = "Production-oriented A-share quant pipeline based on the final autoresearch scheme"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "requests>=2.32",
+    "torch>=2.1",
+]
+
+[project.scripts]
+quant-impl = "quant_impl.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
