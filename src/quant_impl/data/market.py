@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
-from quant_impl.settings import AppConfig, DataSettings
+from quant_impl.settings import AppConfig, DataSettings, TrainingSettings
 from quant_impl.utils.io import write_json
 
 
@@ -538,6 +538,34 @@ def normalize_cross_section(features: torch.Tensor, clip_value: float) -> torch.
     return normalized.clamp_(-clip_value, clip_value)
 
 
+def transform_training_targets(
+    targets: torch.Tensor,
+    group_sizes: Sequence[int],
+    training_cfg: TrainingSettings,
+) -> torch.Tensor:
+    mode = str(training_cfg.target_transform).lower()
+    if mode == "raw":
+        return targets.float()
+    if mode != "rank_center":
+        raise ValueError(f"Unsupported training target transform: {training_cfg.target_transform}")
+
+    transformed_chunks: list[torch.Tensor] = []
+    offset = 0
+    for group_size in group_sizes:
+        next_offset = offset + group_size
+        day_targets = targets[offset:next_offset].float()
+        offset = next_offset
+        if group_size <= 1:
+            transformed_chunks.append(day_targets)
+            continue
+        order = torch.argsort(day_targets, descending=True)
+        ranks = torch.empty(group_size, device=day_targets.device, dtype=day_targets.dtype)
+        ranks[order] = torch.arange(group_size, device=day_targets.device, dtype=day_targets.dtype)
+        pct_rank = ranks / float(max(group_size - 1, 1))
+        transformed_chunks.append(1.0 - 2.0 * pct_rank)
+    return torch.cat(transformed_chunks, dim=0) if transformed_chunks else targets.float()
+
+
 def make_day_batches(
     bundle,
     day_indices: Sequence[int],
@@ -546,6 +574,7 @@ def make_day_batches(
     *,
     shuffle: bool = False,
     seed: int | None = None,
+    target_abs_cap: float | None = None,
 ):
     ordered = list(day_indices)
     if shuffle:
@@ -558,20 +587,32 @@ def make_day_batches(
         asset_chunks = []
         group_sizes = []
         dates = []
+        kept_day_indices = []
         for day_index in batch_day_indices:
             features, targets, asset_ids = get_day_data(bundle, day_index)
+            if target_abs_cap is not None and target_abs_cap > 0:
+                keep_mask = targets.abs() <= float(target_abs_cap)
+                if not bool(keep_mask.all().item()):
+                    features = features[keep_mask]
+                    targets = targets[keep_mask]
+                    asset_ids = asset_ids[keep_mask]
+                if targets.numel() <= 0:
+                    continue
             feature_chunks.append(normalize_cross_section(features.float(), clip_value))
             target_chunks.append(targets.float())
             asset_chunks.append(asset_ids)
             group_sizes.append(int(targets.shape[0]))
             dates.append(bundle["dates"][day_index])
+            kept_day_indices.append(day_index)
+        if not feature_chunks:
+            continue
         yield {
             "features": torch.cat(feature_chunks, dim=0),
             "targets": torch.cat(target_chunks, dim=0),
             "asset_ids": torch.cat(asset_chunks, dim=0),
             "group_sizes": group_sizes,
             "dates": dates,
-            "day_indices": batch_day_indices,
+            "day_indices": kept_day_indices,
         }
 
 
@@ -702,6 +743,8 @@ def evaluate_ranker(
     top_k: int | None = None,
     batch_days: int = 32,
 ):
+    from quant_impl.modeling.ranker import rerank_shortlist_scores
+
     model.eval()
     dates: list[str] = []
     selected_returns: list[float] = []
@@ -715,7 +758,15 @@ def evaluate_ranker(
         clip_value=data_cfg.normalized_clip,
         shuffle=False,
     ):
-        predictions = model.score_batch(batch["features"].to(device), batch["group_sizes"]).detach().cpu()
+        components = model.forward_components(batch["features"].to(device))
+        predictions, _ = rerank_shortlist_scores(
+            model,
+            components["broad_score"].detach().float(),
+            components["linear_score"].detach().float(),
+            components["rerank_latent"].detach().float(),
+            batch["group_sizes"],
+        )
+        predictions = predictions.cpu()
         offset = 0
         for group_size, date in zip(batch["group_sizes"], batch["dates"]):
             next_offset = offset + group_size
@@ -735,22 +786,56 @@ def evaluate_ranker(
     return summarize_period(data_cfg, dates, selected_returns, universe_returns, oracle_returns)
 
 
-def compute_linear_ic_weights(bundle, data_cfg: DataSettings, day_indices: Sequence[int]) -> torch.Tensor:
-    correlations = []
+def compute_linear_ic_weights(
+    bundle,
+    data_cfg: DataSettings,
+    training_cfg: TrainingSettings,
+    day_indices: Sequence[int],
+) -> torch.Tensor:
+    feature_dim = bundle["features"].shape[1]
+    accumulator = np.zeros(feature_dim, dtype=np.float64)
+    total_weight = 0.0
     for day_index in day_indices:
-        features, targets, _ = get_day_data(bundle, day_index)
-        if targets.numel() < 4:
+        batch = next(
+            make_day_batches(
+                bundle,
+                day_indices=[day_index],
+                batch_days=1,
+                clip_value=data_cfg.normalized_clip,
+                shuffle=False,
+                target_abs_cap=(
+                    training_cfg.train_target_abs_cap
+                    if training_cfg.train_target_cap_applies_to_linear_head
+                    else None
+                ),
+            ),
+            None,
+        )
+        if batch is None:
             continue
-        normed = normalize_cross_section(features.float(), data_cfg.normalized_clip)
-        centered_targets = targets.float() - targets.float().mean()
-        target_std = centered_targets.std(unbiased=False).clamp_min(1e-6)
-        standardized_targets = centered_targets / target_std
-        correlations.append((normed * standardized_targets.unsqueeze(1)).mean(dim=0))
-    if not correlations:
+        features = batch["features"].numpy()
+        targets = transform_training_targets(batch["targets"], batch["group_sizes"], training_cfg).numpy()
+        centered_targets = targets - targets.mean()
+        target_std = centered_targets.std()
+        if target_std < 1e-8:
+            continue
+        centered_features = features - features.mean(axis=0, keepdims=True)
+        feature_std = features.std(axis=0)
+        denom = feature_std * target_std
+        accumulator += np.divide(
+            (centered_features * centered_targets[:, None]).mean(axis=0),
+            denom,
+            out=np.zeros(feature_dim, dtype=np.float64),
+            where=denom > 1e-8,
+        )
+        total_weight += 1.0
+    if total_weight <= 0:
         return torch.zeros(bundle["features"].shape[1], dtype=torch.float32)
-    weight = torch.stack(correlations).mean(dim=0)
-    weight = torch.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0)
-    return weight / weight.norm().clamp_min(1e-6)
+    weight = accumulator / total_weight
+    norm = np.linalg.norm(weight)
+    if norm > 0:
+        weight = weight / norm
+    return torch.from_numpy(weight.astype(np.float32, copy=False))
 
 
 def latest_market_date(config: AppConfig) -> str:

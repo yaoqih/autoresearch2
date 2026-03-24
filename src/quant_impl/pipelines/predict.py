@@ -7,7 +7,7 @@ import torch
 
 from quant_impl.data.market import build_scoring_snapshot, normalize_cross_section
 from quant_impl.modeling.ranker import CrossSectionalRanker
-from quant_impl.settings import AppConfig
+from quant_impl.settings import AppConfig, ModelSettings
 from quant_impl.utils.io import utc_timestamp, write_json
 
 
@@ -18,8 +18,13 @@ def _load_model(config: AppConfig, device: torch.device) -> tuple[CrossSectional
     if not config.model_path.exists():
         raise FileNotFoundError(f"Model artifact not found: {config.model_path}")
     artifact = torch.load(config.model_path, map_location="cpu", weights_only=False)
+    model_cfg = ModelSettings()
+    for key, value in artifact.get("model_config", {}).items():
+        if hasattr(model_cfg, key):
+            current = getattr(model_cfg, key)
+            setattr(model_cfg, key, tuple(value) if isinstance(current, tuple) else value)
     linear_weights = artifact["state_dict"]["linear_head.weight"].squeeze(0)
-    model = CrossSectionalRanker(len(artifact["feature_names"]), config.model, linear_weights)
+    model = CrossSectionalRanker(len(artifact["feature_names"]), model_cfg, linear_weights)
     model.load_state_dict(artifact["state_dict"])
     model.to(device)
     model.eval()
@@ -54,7 +59,7 @@ def predict_pipeline(
     model, artifact = _load_model(config, device_obj)
     snapshot = build_scoring_snapshot(config, as_of_date=as_of_date, limit_stocks=limit_stocks)
     features = normalize_cross_section(snapshot["features"].float(), config.data.normalized_clip).to(device_obj)
-    scores = model.score_day(features).scores.detach().cpu()
+    scores = model.score_batch(features, [features.shape[0]]).detach().cpu()
     order = torch.argsort(scores, descending=True)
 
     top_n = min(config.inference.archive_top_n, len(order))

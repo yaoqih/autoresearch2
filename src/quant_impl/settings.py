@@ -83,7 +83,7 @@ class DownloadSettings:
 
 @dataclass
 class DataSettings:
-    cache_version: str = "deploy_candidate_v1_baseline_champion"
+    cache_version: str = "champion_20260323_lc96_rank_center_full5y"
     min_listed_days: int = 120
     min_daily_universe: int = 100
     target_clip: tuple[float, float] = (-0.25, 0.25)
@@ -120,19 +120,26 @@ class ModelSettings:
     dropout: float = 0.2
     activation: str = "gelu"
     use_layernorm: bool = False
-    num_residual_blocks: int = 3
+    num_residual_blocks: int = 2
     linear_head_mix: float = 0.6
     freeze_linear_head: bool = True
-    shortlist_size: int = 64
+    shortlist_size: int = 96
+    secondary_shortlist_size: int = 0
+    secondary_shortlist_source: str = "off"
     rerank_dim: int = 96
     rerank_blocks: int = 2
     rerank_heads: int = 8
-    rerank_mix: float = 0.35
+    rerank_mix: float = 0.25
     shortlist_target_blend: float = 0.75
 
 
 @dataclass
 class TrainingSettings:
+    member_config: str = "lc96"
+    temporal_mode: str = "full5y"
+    target_transform: str = "rank_center"
+    train_target_abs_cap: float = 0.10
+    train_target_cap_applies_to_linear_head: bool = True
     seed: int = 42
     epochs: int = 18
     batch_days: int = 20
@@ -142,19 +149,20 @@ class TrainingSettings:
     grad_clip: float = 1.0
     early_stopping_patience: int = 4
     positive_fraction: float = 0.08
-    pair_samples_per_day: int = 64
-    pair_focus_fraction: float = 0.2
+    pair_samples_per_day: int = 96
+    pair_focus_fraction: float = 0.33
     listwise_target_blend: float = 0.9
-    top_bucket_expansion_scale: float = 12.0
-    listwise_loss_weight: float = 0.4808326891
-    pairwise_loss_weight: float = 0.1791337469
-    huber_loss_weight: float = 0.1319932872
-    binary_loss_weight: float = 0.0471404597
-    winner_loss_weight: float = 0.1039352856
-    rerank_listwise_loss_weight: float = 0.0569645315
+    top_bucket_expansion_scale: float = 10.0
+    listwise_loss_weight: float = 0.51
+    pairwise_loss_weight: float = 0.19
+    huber_loss_weight: float = 0.14
+    binary_loss_weight: float = 0.05
+    winner_loss_weight: float = 0.11
+    rerank_listwise_loss_weight: float = 0.06
     recent_holdout_folds: int = 5
-    research_holdout_weight: float = 0.5
-    research_recent_weight: float = 0.3
+    recent_holdout_weight: float = 1.75
+    research_holdout_weight: float = 0.35
+    research_recent_weight: float = 0.45
     research_valid_weight: float = 0.2
 
 
@@ -162,7 +170,7 @@ class TrainingSettings:
 class InferenceSettings:
     top_k: int = 1
     archive_top_n: int = 10
-    prediction_name: str = "deploy_candidate_v1_baseline_champion"
+    prediction_name: str = "champion_20260323_lc96_rank_center_full5y"
 
 
 @dataclass
@@ -207,6 +215,8 @@ def _merge_dataclass(instance: Any, payload: dict[str, Any]) -> Any:
             continue
         current = getattr(instance, key)
         if isinstance(current, Path):
+            setattr(instance, key, Path(value))
+        elif key == "reference_merged_parquet" and value is not None:
             setattr(instance, key, Path(value))
         elif isinstance(current, tuple):
             setattr(instance, key, tuple(value))

@@ -102,8 +102,9 @@ download:
   report_file: artifacts/logs/download_report.jsonl
 
 data:
-  # 当前 bundle 和模型的版本名。建议每轮稳定方案使用不同名字。
-  cache_version: deploy_candidate_v1_baseline_champion
+  # 当前默认主线固定为 2026-03-23 champion：
+  # lc96 + rank_center + train-only abs(target)<=10% + full5y
+  cache_version: champion_20260323_lc96_rank_center_full5y
 
   # 至少上市多少个交易日后，该股票样本才进入训练。
   min_listed_days: 120
@@ -171,8 +172,8 @@ model:
   # 是否启用 LayerNorm。
   use_layernorm: false
 
-  # 每个 stage 后的残差块数。
-  num_residual_blocks: 3
+  # lc96 member override: 每个 stage 后的残差块数。
+  num_residual_blocks: 2
 
   # 线性 IC 头与非线性头的混合权重。
   linear_head_mix: 0.6
@@ -180,15 +181,36 @@ model:
   # 是否冻结线性 IC 头。
   freeze_linear_head: true
 
-  # shortlist rerank 参数。
-  shortlist_size: 64
+  # lc96 champion shortlist rerank 参数。
+  shortlist_size: 96
+  secondary_shortlist_size: 0
+  secondary_shortlist_source: off
   rerank_dim: 96
   rerank_blocks: 2
   rerank_heads: 8
-  rerank_mix: 0.35
+  rerank_mix: 0.25
   shortlist_target_blend: 0.75
 
 training:
+  # Champion 成员配置标识。这里不是实验池，而是固定落地版本。
+  member_config: lc96
+
+  # 时间窗口模式：5y rolling train window。
+  temporal_mode: full5y
+
+  # 训练目标变换：
+  # 先按当日截面收益从高到低排序，再映射为 [-1, 1] 的 centered rank。
+  # 只影响训练损失，不影响验证、holdout 和最终预测评估。
+  target_transform: rank_center
+
+  # 训练样本过滤：
+  # 若原始 raw target 的绝对值超过 10%，该样本仅在训练阶段被剔除。
+  # 推理、验证和 holdout 不做这层过滤。
+  train_target_abs_cap: 0.10
+
+  # 线性 IC 头计算也使用同样的 train-only cap。
+  train_target_cap_applies_to_linear_head: true
+
   # 随机种子。
   seed: 42
 
@@ -214,32 +236,36 @@ training:
   # 前排正样本比例。
   positive_fraction: 0.08
 
-  # 每天抽多少组 pairwise 排序样本。
-  pair_samples_per_day: 64
+  # lc96 champion：每天抽多少组 pairwise 排序样本。
+  pair_samples_per_day: 96
 
-  # pairwise 更关注前排样本的比例。
-  pair_focus_fraction: 0.2
+  # lc96 member override：pairwise 更关注前排样本的比例。
+  pair_focus_fraction: 0.33
 
   # listwise 监督与扩展目标的混合权重。
   listwise_target_blend: 0.9
 
-  # 前排监督桶的扩展尺度。
-  top_bucket_expansion_scale: 12.0
+  # lc96 champion：前排监督桶的扩展尺度。
+  top_bucket_expansion_scale: 10.0
 
-  # 各损失项权重。
-  listwise_loss_weight: 0.4808326891
-  pairwise_loss_weight: 0.1791337469
-  huber_loss_weight: 0.1319932872
-  binary_loss_weight: 0.0471404597
-  winner_loss_weight: 0.1039352856
-  rerank_listwise_loss_weight: 0.0569645315
+  # lc96 member override 各损失项权重。
+  listwise_loss_weight: 0.51
+  pairwise_loss_weight: 0.19
+  huber_loss_weight: 0.14
+  binary_loss_weight: 0.05
+  winner_loss_weight: 0.11
+  rerank_listwise_loss_weight: 0.06
 
   # 汇总 research_score 时，最近 holdout 取多少个 fold。
   recent_holdout_folds: 5
 
-  # research_score 的加权组成。
-  research_holdout_weight: 0.5
-  research_recent_weight: 0.3
+  # reference 聚合口径：
+  # 最近 recent_holdout_folds 个 holdout 会在 merge 时按这个权重重复采样。
+  recent_holdout_weight: 1.75
+
+  # research_score 的加权组成，和原研究脚本保持一致。
+  research_holdout_weight: 0.35
+  research_recent_weight: 0.45
   research_valid_weight: 0.2
 
 inference:
@@ -250,4 +276,4 @@ inference:
   archive_top_n: 10
 
   # 预测方案名称，会写入归档文件。
-  prediction_name: deploy_candidate_v1_baseline_champion
+  prediction_name: champion_20260323_lc96_rank_center_full5y

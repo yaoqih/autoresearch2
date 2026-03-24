@@ -17,6 +17,9 @@ from quant_impl.data.market import (
     feature_columns,
     load_market_bundle,
     make_day_batches,
+    simulate_sleeve_equity,
+    summarize_period,
+    transform_training_targets,
 )
 from quant_impl.modeling.ranker import CrossSectionalRanker, compute_training_loss
 from quant_impl.settings import AppConfig
@@ -32,6 +35,32 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+class NoOpGradScaler:
+    def scale(self, loss: torch.Tensor) -> torch.Tensor:
+        return loss
+
+    def unscale_(self, optimizer: torch.optim.Optimizer) -> None:
+        del optimizer
+
+    def step(self, optimizer: torch.optim.Optimizer) -> None:
+        optimizer.step()
+
+    def update(self) -> None:
+        return None
+
+
+if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+    def build_grad_scaler(device_type: str):
+        if device_type != "cuda":
+            return NoOpGradScaler()
+        return torch.amp.GradScaler(device_type, enabled=True)
+else:
+    def build_grad_scaler(device_type: str):
+        if device_type != "cuda":
+            return NoOpGradScaler()
+        return torch.cuda.amp.GradScaler(enabled=True)
 
 
 def resolve_device(device: str | None = None) -> torch.device:
@@ -58,6 +87,72 @@ def _clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
+def _merge_reports(reports: list[dict[str, object]], config: AppConfig) -> dict[str, object]:
+    rows: list[tuple[str, float, float, float]] = []
+    for report in reports:
+        daily = report["daily"]
+        rows.extend(
+            zip(
+                daily["dates"],
+                daily["selected_returns"],
+                daily["universe_returns"],
+                daily["oracle_returns"],
+            )
+        )
+    rows.sort(key=lambda item: item[0])
+    if not rows:
+        return summarize_period(config.data, [], [], [], [])
+    return summarize_period(
+        config.data,
+        [row[0] for row in rows],
+        [float(row[1]) for row in rows],
+        [float(row[2]) for row in rows],
+        [float(row[3]) for row in rows],
+    )
+
+
+def _weighted_merge_reports(reports: list[dict[str, object]], weights: list[float], config: AppConfig) -> dict[str, object]:
+    rows: list[tuple[str, float, float, float]] = []
+    for report, weight in zip(reports, weights):
+        daily = report["daily"]
+        repeats = max(1, int(round(weight * 4)))
+        for _ in range(repeats):
+            rows.extend(
+                zip(
+                    daily["dates"],
+                    daily["selected_returns"],
+                    daily["universe_returns"],
+                    daily["oracle_returns"],
+                )
+            )
+    rows.sort(key=lambda item: item[0])
+    if not rows:
+        return summarize_period(config.data, [], [], [], [])
+    return summarize_period(
+        config.data,
+        [row[0] for row in rows],
+        [float(row[1]) for row in rows],
+        [float(row[2]) for row in rows],
+        [float(row[3]) for row in rows],
+    )
+
+
+def _report_log_equity(report: dict[str, object], config: AppConfig) -> float:
+    returns = report["daily"]["selected_returns"]
+    if not returns:
+        return 0.0
+    equity = simulate_sleeve_equity(returns, config.data.holding_days)
+    return float(np.log(np.clip(equity[-1], 1e-12, None)))
+
+
+def _report_ret_dd_ratio(report: dict[str, object]) -> float:
+    metrics = report["metrics"]
+    drawdown = abs(float(metrics["max_drawdown"]))
+    if drawdown <= 1e-12:
+        return 0.0
+    return float(metrics["mean_return"]) / drawdown
+
+
 def fit_one_window(
     bundle,
     config: AppConfig,
@@ -65,6 +160,7 @@ def fit_one_window(
     train_day_indices: list[int],
     valid_day_indices: list[int],
     *,
+    seed_base: int,
     window_name: str,
 ) -> tuple[CrossSectionalRanker, dict[str, object]]:
     LOGGER.info(
@@ -74,7 +170,7 @@ def fit_one_window(
         len(valid_day_indices),
         device,
     )
-    linear_weights = compute_linear_ic_weights(bundle, config.data, train_day_indices)
+    linear_weights = compute_linear_ic_weights(bundle, config.data, config.training, train_day_indices)
     model = CrossSectionalRanker(bundle["features"].shape[1], config.model, linear_weights).to(device)
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(
@@ -82,7 +178,7 @@ def fit_one_window(
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = build_grad_scaler(device.type)
 
     best_state = _clone_state_dict(model)
     best_valid = float("-inf")
@@ -91,8 +187,9 @@ def fit_one_window(
     patience = 0
     history = []
     autocast_enabled = device.type == "cuda"
+    autocast_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
 
-    for epoch in range(config.training.epochs):
+    for epoch in range(1, config.training.epochs + 1):
         model.train()
         epoch_losses = []
         for batch in make_day_batches(
@@ -101,20 +198,40 @@ def fit_one_window(
             batch_days=config.training.batch_days,
             clip_value=config.data.normalized_clip,
             shuffle=True,
-            seed=config.training.seed + epoch,
+            seed=seed_base + epoch,
+            target_abs_cap=config.training.train_target_abs_cap,
         ):
             optimizer.zero_grad(set_to_none=True)
             features = batch["features"].to(device)
-            targets = batch["targets"].to(device)
-            with torch.autocast(device_type=device.type, enabled=autocast_enabled):
-                outputs = model.day_outputs(features, batch["group_sizes"])
-                loss, loss_parts = compute_training_loss(outputs, targets, batch["group_sizes"], config.training)
+            raw_targets = batch["targets"].to(device)
+            targets = transform_training_targets(raw_targets, batch["group_sizes"], config.training)
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=autocast_enabled):
+                outputs = model.forward_components(features)
+                loss, loss_parts = compute_training_loss(
+                    model,
+                    outputs,
+                    targets,
+                    batch["group_sizes"],
+                    config.model,
+                    config.data,
+                    config.training,
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(parameters, config.training.grad_clip)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.grad_clip)
             scaler.step(optimizer)
             scaler.update()
-            epoch_losses.append({"loss": float(loss.detach().cpu().item()), **loss_parts})
+            epoch_losses.append(
+                {
+                    "loss": float(loss.detach().cpu().item()),
+                    "listwise": float(loss_parts["listwise"].detach().cpu().item()),
+                    "pairwise": float(loss_parts["pairwise"].detach().cpu().item()),
+                    "huber": float(loss_parts["huber"].detach().cpu().item()),
+                    "binary": float(loss_parts["binary"].detach().cpu().item()),
+                    "winner": float(loss_parts["winner"].detach().cpu().item()),
+                    "rerank_listwise": float(loss_parts["rerank_listwise"].detach().cpu().item()),
+                }
+            )
 
         valid_eval = evaluate_ranker(
             model,
@@ -130,6 +247,12 @@ def fit_one_window(
             {
                 "epoch": epoch,
                 "train_loss": float(np.mean([item["loss"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_listwise_loss": float(np.mean([item["listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_pairwise_loss": float(np.mean([item["pairwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_huber_loss": float(np.mean([item["huber"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_binary_loss": float(np.mean([item["binary"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_winner_loss": float(np.mean([item["winner"] for item in epoch_losses])) if epoch_losses else 0.0,
+                "train_rerank_listwise_loss": float(np.mean([item["rerank_listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
                 "valid_selection_score": valid_score,
                 "valid_mean_return": valid_eval["metrics"]["mean_return"],
                 "valid_mean_alpha": valid_eval["metrics"]["mean_alpha"],
@@ -138,7 +261,7 @@ def fit_one_window(
         LOGGER.info(
             "Window epoch name=%s epoch=%s/%s train_loss=%.6f valid_selection=%.6f valid_alpha=%.6f",
             window_name,
-            epoch + 1,
+            epoch,
             config.training.epochs,
             history[-1]["train_loss"],
             valid_score,
@@ -156,7 +279,7 @@ def fit_one_window(
                 LOGGER.info(
                     "Window early stop name=%s epoch=%s patience=%s",
                     window_name,
-                    epoch + 1,
+                    epoch,
                     config.training.early_stopping_patience,
                 )
                 break
@@ -165,7 +288,7 @@ def fit_one_window(
     LOGGER.info(
         "Training window finished name=%s best_epoch=%s best_selection=%.6f",
         window_name,
-        best_epoch + 1,
+        best_epoch,
         best_valid,
     )
     return model, {
@@ -175,32 +298,61 @@ def fit_one_window(
     }
 
 
-def _aggregate_metric(fold_summaries: list[dict[str, object]], section: str, metric_name: str) -> float:
-    values = [fold[section]["metrics"][metric_name] for fold in fold_summaries]
-    return float(np.mean(values)) if values else 0.0
-
-
 def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, object]]) -> dict[str, object]:
-    recent = fold_summaries[-config.training.recent_holdout_folds :] if fold_summaries else []
-    valid_selection = _aggregate_metric(fold_summaries, "valid", "selection_score")
-    holdout_selection = _aggregate_metric(fold_summaries, "holdout", "selection_score")
-    recent_selection = _aggregate_metric(recent, "holdout", "selection_score") if recent else holdout_selection
-    research_score = config.training.research_holdout_weight * holdout_selection
-    research_score += config.training.research_recent_weight * recent_selection
-    research_score += config.training.research_valid_weight * valid_selection
+    valid_reports = [fold["valid"] for fold in fold_summaries]
+    holdout_reports = [fold["holdout"] for fold in fold_summaries]
+    aggregate_valid = _merge_reports(valid_reports, config)
+    aggregate_holdout = _merge_reports(holdout_reports, config)
+
+    holdout_weights = [1.0] * len(holdout_reports)
+    recent_window = min(config.training.recent_holdout_folds, len(holdout_weights))
+    for index in range(max(0, len(holdout_weights) - recent_window), len(holdout_weights)):
+        holdout_weights[index] = config.training.recent_holdout_weight
+    recent_holdout = _weighted_merge_reports(holdout_reports, holdout_weights, config)
+
+    valid_metrics = aggregate_valid["metrics"]
+    holdout_metrics = aggregate_holdout["metrics"]
+    recent_metrics = recent_holdout["metrics"]
+    research_score = float(
+        np.average(
+            [
+                float(holdout_metrics["selection_score"]),
+                float(recent_metrics["selection_score"]),
+                float(valid_metrics["selection_score"]),
+            ],
+            weights=[
+                config.training.research_holdout_weight,
+                config.training.research_recent_weight,
+                config.training.research_valid_weight,
+            ],
+        )
+    )
     return {
-        "research_score": float(research_score),
-        "cv_valid_selection_score": valid_selection,
-        "cv_valid_mean_return": _aggregate_metric(fold_summaries, "valid", "mean_return"),
-        "cv_valid_mean_alpha": _aggregate_metric(fold_summaries, "valid", "mean_alpha"),
-        "cv_holdout_selection_score": holdout_selection,
-        "cv_holdout_mean_return": _aggregate_metric(fold_summaries, "holdout", "mean_return"),
-        "cv_holdout_mean_alpha": _aggregate_metric(fold_summaries, "holdout", "mean_alpha"),
-        "cv_holdout_hit_rate": _aggregate_metric(fold_summaries, "holdout", "hit_rate"),
-        "cv_holdout_max_drawdown": _aggregate_metric(fold_summaries, "holdout", "max_drawdown"),
-        "recent_holdout_selection_score": recent_selection,
-        "recent_holdout_mean_return": _aggregate_metric(recent, "holdout", "mean_return") if recent else 0.0,
-        "recent_holdout_mean_alpha": _aggregate_metric(recent, "holdout", "mean_alpha") if recent else 0.0,
+        "research_score": research_score,
+        "cv_valid_selection_score": float(valid_metrics["selection_score"]),
+        "cv_valid_mean_return": float(valid_metrics["mean_return"]),
+        "cv_valid_mean_alpha": float(valid_metrics["mean_alpha"]),
+        "cv_valid_hit_rate": float(valid_metrics["hit_rate"]),
+        "cv_valid_max_drawdown": float(valid_metrics["max_drawdown"]),
+        "cv_valid_ret_dd": _report_ret_dd_ratio(aggregate_valid),
+        "cv_valid_log_equity": _report_log_equity(aggregate_valid, config),
+        "cv_holdout_selection_score": float(holdout_metrics["selection_score"]),
+        "cv_holdout_mean_return": float(holdout_metrics["mean_return"]),
+        "cv_holdout_mean_alpha": float(holdout_metrics["mean_alpha"]),
+        "cv_holdout_hit_rate": float(holdout_metrics["hit_rate"]),
+        "cv_holdout_max_drawdown": float(holdout_metrics["max_drawdown"]),
+        "cv_holdout_ret_dd": _report_ret_dd_ratio(aggregate_holdout),
+        "cv_holdout_log_equity": _report_log_equity(aggregate_holdout, config),
+        "cv_holdout_cumulative_return": float(
+            np.exp(_report_log_equity(aggregate_holdout, config)) if holdout_reports else 1.0
+        ),
+        "recent_holdout_selection_score": float(recent_metrics["selection_score"]),
+        "recent_holdout_mean_return": float(recent_metrics["mean_return"]),
+        "recent_holdout_mean_alpha": float(recent_metrics["mean_alpha"]),
+        "recent_holdout_hit_rate": float(recent_metrics["hit_rate"]),
+        "recent_holdout_max_drawdown": float(recent_metrics["max_drawdown"]),
+        "recent_holdout_ret_dd": _report_ret_dd_ratio(recent_holdout),
+        "recent_holdout_log_equity": _report_log_equity(recent_holdout, config),
     }
 
 
@@ -222,6 +374,13 @@ def train_pipeline(
         limit_stocks,
         runtime_config.training.seed,
     )
+    LOGGER.info(
+        "Champion spec member=%s temporal_mode=%s target_transform=%s train_target_abs_cap=%.4f",
+        runtime_config.training.member_config,
+        runtime_config.training.temporal_mode,
+        runtime_config.training.target_transform,
+        runtime_config.training.train_target_abs_cap,
+    )
     build_market_cache(runtime_config, force=force_prepare, limit_stocks=limit_stocks)
     bundle = load_market_bundle(runtime_config, force=False, limit_stocks=limit_stocks)
     splits = build_walk_forward_splits(bundle, runtime_config.data)
@@ -239,9 +398,12 @@ def train_pipeline(
 
     fold_summaries = []
     for split in splits:
+        fold_seed = runtime_config.training.seed + split.fold_id
+        seed_everything(fold_seed)
         LOGGER.info(
-            "Fold start fold_id=%s train=%s..%s valid=%s..%s holdout=%s..%s",
+            "Fold start fold_id=%s seed=%s train=%s..%s valid=%s..%s holdout=%s..%s",
             split.fold_id,
+            fold_seed,
             split.train_start_date,
             split.train_end_date,
             split.valid_start_date,
@@ -258,6 +420,7 @@ def train_pipeline(
             device_obj,
             train_day_indices,
             valid_day_indices,
+            seed_base=fold_seed,
             window_name=f"fold-{split.fold_id}",
         )
         holdout_eval = evaluate_ranker(
@@ -294,17 +457,27 @@ def train_pipeline(
     deployment_valid_days = min(runtime_config.data.valid_days, len(bundle["dates"]) // 5)
     deployment_train_days = list(range(0, max(1, len(bundle["dates"]) - deployment_valid_days)))
     deployment_valid_indices = list(range(max(1, len(bundle["dates"]) - deployment_valid_days), len(bundle["dates"])))
+    deployment_seed = runtime_config.training.seed + len(splits)
+    seed_everything(deployment_seed)
     deployment_model, deployment_fit = fit_one_window(
         bundle,
         runtime_config,
         device_obj,
         deployment_train_days,
         deployment_valid_indices,
+        seed_base=deployment_seed,
         window_name="deployment",
     )
     artifact = {
         "created_at": utc_timestamp(),
         "profile": profile,
+        "champion_spec": {
+            "member_config": runtime_config.training.member_config,
+            "temporal_mode": runtime_config.training.temporal_mode,
+            "target_transform": runtime_config.training.target_transform,
+            "train_target_abs_cap": runtime_config.training.train_target_abs_cap,
+            "train_target_cap_applies_to_linear_head": runtime_config.training.train_target_cap_applies_to_linear_head,
+        },
         "feature_names": feature_columns(runtime_config.data),
         "model_config": asdict(runtime_config.model),
         "data_config": asdict(runtime_config.data),
@@ -322,6 +495,7 @@ def train_pipeline(
         "summary": summary,
         "folds": fold_summaries,
         "deployment_fit": deployment_fit,
+        "champion_spec": artifact["champion_spec"],
     }
     write_json(runtime_config.training_metrics_path, result)
     LOGGER.info("Training metrics saved path=%s", runtime_config.training_metrics_path)

@@ -1,12 +1,12 @@
 # quant-impl
 
-基于 `/project/autoresearch` 最终研究结论落地的 A 股量化实施仓库。
+基于 `/project/autoresearch` 在 `2026-03-23` 确认的 champion handoff 方案落地的 A 股量化实施仓库。
 
 这个仓库不是研究 runner，而是面向实施和日常运行的量化工程版本。它把研究期已经确认的核心协议固定下来，并补齐了生产侧真正需要的几条链路：
 
 - 数据获取：主入口是 `PYTHONPATH=src python -m quant_impl.cli download`，底层复用 [`download_stock.py`](./download_stock.py)，默认单线程、低速率、可续传。
 - 数据整理：将单票 parquet 合并为市场级 parquet，再构建训练和推理共用的 bundle。
-- 模型训练：保留“线性 IC 先验 + gated residual + shortlist rerank”的主干结构。
+- 模型训练：固定为 `lc96 + rank_center + train-only abs(target)<=10% + full5y`。
 - 每日任务：增量抓数、面板刷新、预测归档、历史预测回填验证。
 - 统一日志：下载、合并、prepare、train、predict、validate、daily 全部接入统一日志目录和命令级日志文件。
 
@@ -15,10 +15,21 @@
 这里固定的不是某一版参数，而是整套标签和评估口径：
 
 - 标签：`open[t+2] / open[t+1] - 1`
+- 训练目标：按当日截面收益排序后映射成 `rank_center`，范围 `[-1, 1]`
+- 训练样本过滤：仅训练阶段剔除 `abs(raw target) > 10%`
 - 交易口径：`t` 日收盘后选股，`t+1` 开盘买入，`t+2` 开盘卖出
 - 评估方式：横截面 `top1`
 - 数据切分：`5y train + 1y valid + 1y holdout`
 - 特征：固定纯日频价量特征，不在日常训练流程里随意改动
+- 禁用项：不保留 `recent4y/recent3y/recent2y`、regime gate、inference-side cap 等旧实验分支
+
+## 精确复现补充
+
+如果你的目标不是“迁移同一套策略”，而是“把 full reproduction 做到和参考结果逐项完全一致”，还需要满足一组更严格的实现约束。
+
+- 补充说明见 `docs/champion_reproducibility_appendix.md`
+- 这份附录专门记录 handoff 方案里没有完全显式写出的细节
+- 已在 `2026-03-24` 对参考 full 结果完成一次 exact reproduction，关键指标 `16/16` 与参考 JSON 绝对误差为 `0.0`
 
 ## 仓库结构
 
@@ -26,6 +37,8 @@
   - 东财日线抓取脚本，输出单票 parquet
 - `configs/default.yaml`
   - 默认配置文件，已带注释
+- `docs/champion_reproducibility_appendix.md`
+  - 冠军方案 exact reproduction 附录，记录随机种子、loss 聚合、AMP/dtype 等隐含约束
 - `src/quant_impl/cli.py`
   - 所有主命令入口
 - `artifacts/logs/`
@@ -99,6 +112,8 @@ pip install akshare
 
 ## 快速开始
 
+默认配置已经直接切到 champion 主线，不需要再从实验脚本挑 variant。
+
 ### 0. 先下载数据
 
 ```bash
@@ -136,6 +151,13 @@ PYTHONPATH=src python -m quant_impl.cli train --profile screen --device cuda:3
 - 快速试跑用 `screen`
 - 中等检查用 `probe`
 - 正式训练用 `full`
+
+默认训练含义：
+
+- member config: `lc96`
+- target transform: `rank_center`
+- train-only target cap: `10%`
+- temporal mode: `full5y`
 
 ### 3. 生成最新预测
 
@@ -291,6 +313,13 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
 - 模型文件：`artifacts/models/*.pt`
 - 指标文件：`artifacts/metrics/*_training.json`
 - 日志文件：`artifacts/logs/train.log`
+
+训练产物会额外写入 champion 快照：
+
+- `member_config = lc96`
+- `target_transform = rank_center`
+- `train_target_abs_cap = 0.10`
+- `temporal_mode = full5y`
 
 ### `predict`
 
@@ -485,7 +514,7 @@ python download_stock.py \
 - `model`
   - 模型结构
 - `training`
-  - 训练超参数与损失权重
+  - 训练超参数、champion target transform 和 train-only cap
 - `inference`
   - 推理和归档行为
 
@@ -498,6 +527,13 @@ python download_stock.py \
 - `download.max_workers`
 - `paths.*`
 - `inference.prediction_name`
+
+如果你只是复现当前 champion，通常不应该改这些字段：
+
+- `training.member_config`
+- `training.temporal_mode`
+- `training.target_transform`
+- `training.train_target_abs_cap`
 
 ## 常见使用场景
 
