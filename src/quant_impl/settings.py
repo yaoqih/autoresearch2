@@ -66,6 +66,15 @@ class DownloadSettings:
     start_date: str = "1990-01-01"
     end_date: str | None = None
     adjust: str = "hfq"
+    use_env_proxy: bool = False
+    eastmoney_cookie_warmup: bool = False
+    eastmoney_cookie_cache_file: str | None = "artifacts/cache/eastmoney_cookie.json"
+    eastmoney_cookie_max_age_seconds: int = 21600
+    eastmoney_cookie_node_binary: str = "node"
+    eastmoney_cookie_script: str = "tools/eastmoney_cookie_warmer.mjs"
+    eastmoney_browser_path: str | None = None
+    eastmoney_browser_proxy: str | None = None
+    eastmoney_cookie_timeout_ms: int = 15000
     max_workers: int = 1
     host_max_workers: int = 1
     max_retries: int = 6

@@ -30,6 +30,8 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
     refresh_start_date = _refresh_start_date(config)
     log_file = resolve_log_file_path(config, "download")
     report_file = resolve_runtime_path(config.download.report_file)
+    cookie_cache_file = resolve_runtime_path(config.download.eastmoney_cookie_cache_file)
+    cookie_script = resolve_runtime_path(config.download.eastmoney_cookie_script)
     cmd = [
         sys.executable,
         str(script_path),
@@ -56,6 +58,7 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         "--log-level",
         str(config.logging.level).upper(),
     ]
+    cmd.append("--use-env-proxy" if config.download.use_env_proxy else "--no-use-env-proxy")
     if not config.logging.console:
         cmd.append("--no-console-log")
     if config.download.end_date:
@@ -66,6 +69,19 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         cmd.extend(["--log-file", str(log_file)])
     if report_file is not None:
         cmd.extend(["--report-file", str(report_file)])
+    if config.download.eastmoney_cookie_warmup:
+        cmd.append("--eastmoney-cookie-warmup")
+        if cookie_cache_file is not None:
+            cmd.extend(["--eastmoney-cookie-cache-file", str(cookie_cache_file)])
+        cmd.extend(["--eastmoney-cookie-max-age-seconds", str(config.download.eastmoney_cookie_max_age_seconds)])
+        cmd.extend(["--eastmoney-cookie-node-binary", str(config.download.eastmoney_cookie_node_binary)])
+        if cookie_script is not None:
+            cmd.extend(["--eastmoney-cookie-script", str(cookie_script)])
+        if config.download.eastmoney_browser_path:
+            cmd.extend(["--eastmoney-browser-path", str(config.download.eastmoney_browser_path)])
+        if config.download.eastmoney_browser_proxy:
+            cmd.extend(["--eastmoney-browser-proxy", str(config.download.eastmoney_browser_proxy)])
+        cmd.extend(["--eastmoney-cookie-timeout-ms", str(config.download.eastmoney_cookie_timeout_ms)])
     if config.download.shuffle_symbols:
         cmd.append("--shuffle-symbols")
     if config.download.symbols_file:
@@ -90,6 +106,7 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         "refresh_start_date": refresh_start_date,
         "log_file": str(log_file) if log_file is not None else None,
         "report_file": str(report_file) if report_file is not None else None,
+        "eastmoney_cookie_cache_file": str(cookie_cache_file) if cookie_cache_file is not None else None,
     }
 
 

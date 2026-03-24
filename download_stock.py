@@ -12,11 +12,12 @@ import math
 import os
 import random
 import re
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set
 import sys
 
 try:
@@ -304,6 +305,121 @@ class ProxyPool:
 
 
 @dataclasses.dataclass(frozen=True)
+class EastmoneyCookieWarmupConfig:
+    enabled: bool = False
+    cache_file: Optional[Path] = None
+    max_age_seconds: int = 21600
+    node_binary: str = "node"
+    script_path: Optional[Path] = None
+    browser_path: Optional[str] = None
+    browser_proxy: Optional[str] = None
+    timeout_ms: int = 15000
+
+
+class EastmoneyCookieWarmupManager:
+    REQUIRED_COOKIE_NAMES = ("nid18", "nid18_create_time")
+
+    def __init__(
+        self,
+        config: EastmoneyCookieWarmupConfig,
+        *,
+        now_fn: Optional[Callable[[], dt.datetime]] = None,
+    ):
+        self._config = config
+        self._now_fn = now_fn or (lambda: dt.datetime.now(dt.timezone.utc))
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _normalize_timestamp(value: str) -> dt.datetime:
+        parsed = dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+
+    def _is_cache_fresh(self, payload: dict) -> bool:
+        fetched_at = payload.get("fetched_at")
+        cookie_header = str(payload.get("cookie_header") or "").strip()
+        if not fetched_at or not cookie_header:
+            return False
+        try:
+            fetched_dt = self._normalize_timestamp(str(fetched_at))
+        except ValueError:
+            return False
+        age = (self._now_fn() - fetched_dt).total_seconds()
+        return age >= 0 and age <= max(int(self._config.max_age_seconds or 0), 0)
+
+    def _load_cache(self) -> Optional[str]:
+        cache_file = self._config.cache_file
+        if cache_file is None or not cache_file.exists():
+            return None
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not self._is_cache_fresh(payload):
+            return None
+        return str(payload.get("cookie_header") or "").strip() or None
+
+    def _write_cache(self, cookie_header: str, fetched_at: str) -> None:
+        cache_file = self._config.cache_file
+        if cache_file is None:
+            return
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cookie_header": cookie_header,
+            "fetched_at": fetched_at,
+        }
+        cache_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    def _build_command(self) -> list[str]:
+        if self._config.script_path is None:
+            raise RuntimeError("Eastmoney cookie warmer script path is not configured")
+        command = [
+            str(self._config.node_binary or "node"),
+            str(self._config.script_path),
+            "--timeout-ms",
+            str(max(int(self._config.timeout_ms or 15000), 1000)),
+        ]
+        if self._config.browser_path:
+            command.extend(["--browser-path", self._config.browser_path])
+        if self._config.browser_proxy:
+            command.extend(["--proxy", self._config.browser_proxy])
+        return command
+
+    def _refresh(self) -> str:
+        command = self._build_command()
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Cookie warmer returned invalid JSON: {completed.stdout[:200]}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Cookie warmer returned an invalid payload type")
+        missing = [name for name in self.REQUIRED_COOKIE_NAMES if not payload.get(name)]
+        if missing:
+            raise RuntimeError(f"Cookie warmer missing required cookies: {', '.join(missing)}")
+        cookie_header = "; ".join(f"{name}={payload[name]}" for name in self.REQUIRED_COOKIE_NAMES)
+        fetched_at = str(payload.get("fetched_at") or self._now_fn().isoformat())
+        self._write_cache(cookie_header, fetched_at)
+        return cookie_header
+
+    def get_cookie_header(self, force_refresh: bool = False) -> str:
+        if not self._config.enabled:
+            return ""
+        with self._lock:
+            if not force_refresh:
+                cached = self._load_cache()
+                if cached:
+                    return cached
+            return self._refresh()
+
+
+@dataclasses.dataclass(frozen=True)
 class Instrument:
     code: str
     market: str
@@ -346,6 +462,8 @@ class HttpClient:
         request_interval: float,
         request_jitter: float,
         retry_sleep: float,
+        use_env_proxy: bool = False,
+        cookie_manager: Optional[EastmoneyCookieWarmupManager] = None,
     ):
         self._proxy_pool = proxy_pool
         self._timeout = timeout
@@ -353,10 +471,12 @@ class HttpClient:
         self._request_interval = max(0.0, float(request_interval))
         self._request_jitter = max(0.0, float(request_jitter))
         self._retry_sleep = max(0.0, float(retry_sleep))
+        self._cookie_manager = cookie_manager
         self._request_lock = threading.Lock()
         self._next_request_ts = 0.0
         self._logger = logging.getLogger("http_client")
         self._session = requests.Session()
+        self._session.trust_env = use_env_proxy
         self._session.headers.clear()
         self._session.headers.update(REQUEST_HEADERS)
 
@@ -398,16 +518,28 @@ class HttpClient:
         last_exc: Optional[Exception] = None
         exclude: Set[str] = set()
         meta = RequestMeta()
-        for attempt in range(self._max_retries):
+        force_cookie_refresh = False
+        total_budget = self._max_retries + (1 if self._cookie_manager is not None else 0)
+        attempt = 0
+        while True:
+            attempt += 1
+            meta.last_status_code = None
+            meta.anti_bot_suspected = False
+            meta.proxy_endpoint = None
+            meta.detail = ""
             proxy_state = self._proxy_pool.borrow(exclude=exclude) if self._proxy_pool else None
             proxies = proxy_state.as_requests() if proxy_state else None
             proxy_endpoint = proxy_state.endpoint if proxy_state else None
             started_at = time.perf_counter()
             try:
+                if self._cookie_manager is not None:
+                    cookie_header = self._cookie_manager.get_cookie_header(force_refresh=force_cookie_refresh)
+                    if cookie_header:
+                        self._session.headers["Cookie"] = cookie_header
                 self._throttle()
                 response = self._session.get(url, params=params, timeout=self._timeout, proxies=proxies)
                 elapsed_sec = time.perf_counter() - started_at
-                meta.attempts = attempt + 1
+                meta.attempts = attempt
                 meta.elapsed_sec = elapsed_sec
                 meta.last_status_code = response.status_code
                 meta.proxy_endpoint = proxy_endpoint
@@ -421,11 +553,11 @@ class HttpClient:
                     excerpt = self._excerpt(response.text)
                     meta.detail = f"json decode failed content_type={content_type} excerpt={excerpt}"
                     raise RuntimeError(meta.detail) from exc
-                if attempt > 0:
+                if attempt > 1:
                     self._logger.info(
                         "Recovered request for %s after %s attempts status=%s proxy=%s elapsed=%.2fs",
                         request_label or params.get("secid", "request"),
-                        attempt + 1,
+                        attempt,
                         response.status_code,
                         proxy_endpoint or "-",
                         elapsed_sec,
@@ -436,9 +568,14 @@ class HttpClient:
             except Exception as exc:  # noqa: BLE001 - we log and retry
                 last_exc = exc
                 elapsed_sec = time.perf_counter() - started_at
-                meta.attempts = attempt + 1
+                meta.attempts = attempt
                 meta.elapsed_sec = elapsed_sec
                 detail_parts = []
+                allow_cookie_recovery = self._cookie_manager is not None and not force_cookie_refresh
+                allow_standard_retry = attempt < self._max_retries
+                if allow_cookie_recovery:
+                    force_cookie_refresh = True
+                    detail_parts.append("cookie_refresh=forced")
                 if meta.last_status_code is not None:
                     detail_parts.append(f"status={meta.last_status_code}")
                 detail_parts.append(f"proxy={proxy_endpoint or '-'}")
@@ -450,15 +587,17 @@ class HttpClient:
                 self._logger.warning(
                     "Request failed for %s attempt %s/%s anti_bot=%s %s",
                     request_label or params.get("secid", "request"),
-                    attempt + 1,
-                    self._max_retries,
+                    attempt,
+                    total_budget,
                     meta.anti_bot_suspected,
                     meta.detail,
                 )
                 if proxy_state:
                     exclude.add(proxy_state.endpoint)
                     self._proxy_pool.report_failure(proxy_state)
-                if attempt + 1 < self._max_retries and self._retry_sleep > 0:
+                if allow_cookie_recovery:
+                    continue
+                if allow_standard_retry and self._retry_sleep > 0:
                     backoff = min(self._retry_sleep * (attempt + 1), max(2.0, self._retry_sleep * 4))
                     self._logger.info(
                         "Sleeping %.2fs before retry for %s",
@@ -466,8 +605,11 @@ class HttpClient:
                         request_label or params.get("secid", "request"),
                     )
                     time.sleep(backoff)
+                if allow_standard_retry:
+                    continue
+                break
         raise RuntimeError(
-            f"HTTP request failed after {self._max_retries} attempts for "
+            f"HTTP request failed after {attempt} attempts for "
             f"{request_label or params.get('secid', 'request')}: {meta.detail or last_exc}"
         )
 
@@ -864,6 +1006,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-jitter", type=float, default=0.2, help="Extra random sleep added to each request")
     parser.add_argument("--retry-sleep", type=float, default=1.5, help="Base sleep in seconds between failed retries")
     parser.add_argument("--adjust", choices=["none", "qfq", "hfq"], default="hfq")
+    parser.add_argument("--use-env-proxy", dest="use_env_proxy", action="store_true", help="Allow requests to inherit HTTP(S)_PROXY from the environment")
+    parser.add_argument("--no-use-env-proxy", dest="use_env_proxy", action="store_false", help="Ignore HTTP(S)_PROXY from the environment")
+    parser.set_defaults(use_env_proxy=False)
     parser.add_argument("--force", action="store_true", help="Re-download even if local file exists")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of symbols for debugging")
     parser.add_argument("--shuffle-symbols", action="store_true", help="Randomize symbol order to avoid bursty access patterns")
@@ -887,6 +1032,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=1,
         help="Upper bound for local concurrent downloads (0 = auto)",
     )
+    parser.add_argument("--eastmoney-cookie-warmup", action="store_true", help="Warm the minimum Eastmoney cookies with a system Chrome/Chromium before requests")
+    parser.add_argument("--eastmoney-cookie-cache-file", default=None, help="Path to a JSON cache file storing the warmed Eastmoney cookie header")
+    parser.add_argument("--eastmoney-cookie-max-age-seconds", type=int, default=21600, help="Maximum cache age in seconds before refreshing the Eastmoney cookie")
+    parser.add_argument("--eastmoney-cookie-node-binary", default="node", help="Node.js binary used to run the Eastmoney cookie warmer")
+    parser.add_argument("--eastmoney-cookie-script", default=str(ROOT_DIR / "tools" / "eastmoney_cookie_warmer.mjs"), help="Path to the Eastmoney cookie warmer script")
+    parser.add_argument("--eastmoney-browser-path", default=None, help="Optional system Chrome/Chromium executable path for the Eastmoney cookie warmer")
+    parser.add_argument("--eastmoney-browser-proxy", default=None, help="Optional proxy URL passed to Chrome/Chromium during Eastmoney cookie warmup")
+    parser.add_argument("--eastmoney-cookie-timeout-ms", type=int, default=15000, help="Timeout in milliseconds for the Eastmoney cookie warmer")
     return parser
 
 
@@ -911,6 +1064,31 @@ def resolve_symbols(args) -> List[Instrument]:
     if STATIC_SYMBOLS:
         return parse_symbols(STATIC_SYMBOLS)
     raise RuntimeError("No symbols specified; provide --symbols, --symbols-file or populate STATIC_SYMBOLS.")
+
+
+def build_eastmoney_cookie_warmup_config(args) -> Optional[EastmoneyCookieWarmupConfig]:
+    if not args.eastmoney_cookie_warmup:
+        return None
+    browser_proxy = args.eastmoney_browser_proxy
+    if not browser_proxy and args.use_env_proxy:
+        browser_proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+        )
+    cache_file = Path(args.eastmoney_cookie_cache_file) if args.eastmoney_cookie_cache_file else None
+    script_path = Path(args.eastmoney_cookie_script) if args.eastmoney_cookie_script else None
+    return EastmoneyCookieWarmupConfig(
+        enabled=True,
+        cache_file=cache_file,
+        max_age_seconds=max(int(args.eastmoney_cookie_max_age_seconds or 0), 0),
+        node_binary=str(args.eastmoney_cookie_node_binary or "node"),
+        script_path=script_path,
+        browser_path=args.eastmoney_browser_path,
+        browser_proxy=browser_proxy,
+        timeout_ms=max(int(args.eastmoney_cookie_timeout_ms or 15000), 1000),
+    )
 
 
 def main() -> None:
@@ -971,6 +1149,8 @@ def main() -> None:
     if effective_symbols:
         desired_workers = min(desired_workers, effective_symbols)
     worker_count = max(1, desired_workers)
+    cookie_warmup_config = build_eastmoney_cookie_warmup_config(args)
+    cookie_manager = EastmoneyCookieWarmupManager(cookie_warmup_config) if cookie_warmup_config else None
 
     http_client = HttpClient(
         proxy_pool=proxy_pool,
@@ -979,6 +1159,8 @@ def main() -> None:
         request_interval=args.request_interval,
         request_jitter=args.request_jitter,
         retry_sleep=args.retry_sleep,
+        use_env_proxy=args.use_env_proxy,
+        cookie_manager=cookie_manager,
     )
 
     config = CrawlerConfig(

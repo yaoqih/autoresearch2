@@ -1,0 +1,11 @@
+{
+  "name": "quant-impl-tools",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.40.0"
+  }
+}

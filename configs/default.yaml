@@ -60,6 +60,33 @@ download:
   # 复权方式：none / qfq / hfq。
   adjust: hfq
 
+  # 是否继承 shell 中的 http_proxy / https_proxy 环境变量。
+  use_env_proxy: false
+
+  # 是否在抓数前用系统 Chrome/Chromium 预热最小 Eastmoney Cookie。
+  eastmoney_cookie_warmup: true
+
+  # 预热得到的最小 Cookie 缓存文件。
+  eastmoney_cookie_cache_file: artifacts/cache/eastmoney_cookie.json
+
+  # Cookie 缓存可复用的最长秒数。
+  eastmoney_cookie_max_age_seconds: 21600
+
+  # 运行 Cookie 预热器的 Node.js 路径。
+  eastmoney_cookie_node_binary: node
+
+  # Eastmoney Cookie 预热脚本路径。
+  eastmoney_cookie_script: tools/eastmoney_cookie_warmer.mjs
+
+  # 可选：系统 Chrome/Chromium 可执行文件路径。
+  eastmoney_browser_path: null
+
+  # 可选：传给 Chrome/Chromium 的代理地址。
+  eastmoney_browser_proxy: null
+
+  # Cookie 预热超时时间，单位毫秒。
+  eastmoney_cookie_timeout_ms: 15000
+
   # 下载线程数。默认建议保持 1，先稳住而不是追求速度。
   max_workers: 1
 

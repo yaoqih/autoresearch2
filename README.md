@@ -89,6 +89,47 @@ pip install akshare
 - 没有 `akshare` 时，`download_stock.py` 会退化为工作日历近似模式，不会完全阻塞。
 - 当前 CLI 不强依赖 `pytest`，测试默认用 `unittest`。
 
+### 3. 可选：安装 Eastmoney 最小 Cookie 预热器
+
+当 `push2his.eastmoney.com` 直连经常出现“远端直接断开连接”时，建议开启最小 Cookie 预热。这个实现不是常驻浏览器抓数，而是：
+
+1. 用系统 Chrome/Chromium 打开一次 `quote.eastmoney.com`
+2. 只取 `nid18` / `nid18_create_time`
+3. 缓存到本地文件
+4. 后续下载阶段继续走普通 `requests`
+
+Node 侧只依赖一个包：
+
+```bash
+npm install --omit=dev
+```
+
+浏览器安装方式：
+
+- macOS
+  - Google Chrome：`brew install --cask google-chrome`
+  - Chromium：`brew install --cask chromium`
+- Ubuntu / Debian
+  - Google Chrome：先下载官方 `.deb`，再执行 `sudo apt install ./google-chrome-stable_current_amd64.deb`
+  - Chromium：Debian 系通常可用 `sudo apt install chromium`；部分 Ubuntu 镜像更适合 `sudo snap install chromium`
+- Fedora / Rocky / Alma / RHEL 系
+  - Google Chrome：先下载官方 `.rpm`，再执行 `sudo dnf install ./google-chrome-stable_current_x86_64.rpm`
+  - Chromium：Fedora 通常可用 `sudo dnf install chromium`；RHEL 系是否提供 Chromium 取决于启用的仓库，因此生产机更推荐直接装 Google Chrome
+
+安装后，先确认浏览器路径：
+
+```bash
+which google-chrome
+which chromium
+which chromium-browser
+```
+
+macOS 的常见 Chrome 路径是：
+
+```bash
+/Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+```
+
 ## 两种典型使用方式
 
 ### 方式一：你已经有单个市场 parquet
@@ -238,6 +279,10 @@ PYTHONPATH=src python -m quant_impl.cli download --log-level DEBUG
 
 - `start_date`
 - `end_date`
+- `eastmoney_cookie_warmup`
+- `eastmoney_cookie_cache_file`
+- `eastmoney_browser_path`
+- `eastmoney_browser_proxy`
 - `max_workers`
 - `request_interval`
 - `request_jitter`
@@ -264,6 +309,27 @@ PYTHONPATH=src python -m quant_impl.cli download --log-level DEBUG
   - 请求节奏、重试、疑似反爬信号
 - `artifacts/logs/download_report.jsonl`
   - 每只股票最终是成功、空返回还是疑似被拒
+
+如果 Eastmoney 需要预热 Cookie，推荐在配置里显式开启：
+
+```yaml
+download:
+  eastmoney_cookie_warmup: true
+  eastmoney_cookie_cache_file: artifacts/cache/eastmoney_cookie.json
+  eastmoney_cookie_max_age_seconds: 21600
+  eastmoney_cookie_node_binary: node
+  eastmoney_cookie_script: tools/eastmoney_cookie_warmer.mjs
+  eastmoney_browser_path: /usr/bin/google-chrome
+  eastmoney_browser_proxy: null
+  eastmoney_cookie_timeout_ms: 15000
+```
+
+代理兼容说明：
+
+- 直连：`use_env_proxy: false`，`eastmoney_browser_proxy: null`
+- 继承环境代理：`use_env_proxy: true` 且不单独设置 `eastmoney_browser_proxy` 时，预热器会优先读取 `HTTPS_PROXY` / `HTTP_PROXY`
+- 单独给浏览器指定代理：直接设置 `eastmoney_browser_proxy`
+- 下载阶段继续走代理池：保持现有 KDL 配置不变；Cookie 预热只是抓数前的一次轻量会话初始化，不改变代理池的调度逻辑
 
 ### `merge`
 
@@ -455,6 +521,36 @@ python download_stock.py \
   - 命令行直接传股票列表
 - `--symbols-file`
   - 从文件读取股票列表
+- `--eastmoney-cookie-warmup`
+  - 开启最小 Eastmoney Cookie 预热
+- `--eastmoney-cookie-cache-file`
+  - Cookie 缓存文件路径
+- `--eastmoney-cookie-max-age-seconds`
+  - Cookie 缓存最大复用秒数
+- `--eastmoney-cookie-node-binary`
+  - Node.js 路径
+- `--eastmoney-cookie-script`
+  - 预热脚本路径
+- `--eastmoney-browser-path`
+  - 系统 Chrome/Chromium 路径
+- `--eastmoney-browser-proxy`
+  - 传给浏览器的代理地址
+- `--eastmoney-cookie-timeout-ms`
+  - 预热超时时间，单位毫秒
+
+手动验证预热器时，可以先单独执行：
+
+```bash
+node tools/eastmoney_cookie_warmer.mjs \
+  --browser-path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --timeout-ms 15000
+```
+
+正常情况下会输出一行 JSON，包含：
+
+- `nid18`
+- `nid18_create_time`
+- `fetched_at`
 
 排查抓数问题时，推荐这样跑：
 
