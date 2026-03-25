@@ -4,30 +4,19 @@ import logging
 import subprocess
 import sys
 
-import pandas as pd
-
-from quant_impl.data.market import build_market_cache, latest_market_date, merge_daily_parquets
+from quant_impl.data.market import build_market_cache, merge_daily_parquets
 from quant_impl.pipelines.predict import predict_pipeline
 from quant_impl.pipelines.train import train_pipeline
 from quant_impl.pipelines.validate import validate_pipeline
 from quant_impl.settings import AppConfig, REPO_ROOT
 from quant_impl.utils.logging_utils import resolve_log_file_path, resolve_runtime_path
 
-
 LOGGER = logging.getLogger(__name__)
-
-
-def _refresh_start_date(config: AppConfig) -> str:
-    if config.paths.merged_parquet.exists():
-        latest = pd.Timestamp(latest_market_date(config))
-        refreshed = latest - pd.Timedelta(days=config.download.refresh_lookback_days)
-        return max(refreshed, pd.Timestamp(config.download.start_date)).strftime("%Y-%m-%d")
-    return config.download.start_date
 
 
 def run_download_step(config: AppConfig) -> dict[str, object]:
     script_path = REPO_ROOT / "download_stock.py"
-    refresh_start_date = _refresh_start_date(config)
+    start_date = config.download.start_date
     log_file = resolve_log_file_path(config, "download")
     report_file = resolve_runtime_path(config.download.report_file)
     cookie_cache_file = resolve_runtime_path(config.download.eastmoney_cookie_cache_file)
@@ -38,7 +27,7 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         "--parquet-dir",
         str(config.paths.raw_daily_dir),
         "--start-date",
-        refresh_start_date,
+        start_date,
         "--adjust",
         config.download.adjust,
         "--max-workers",
@@ -59,6 +48,21 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         str(config.logging.level).upper(),
     ]
     cmd.append("--use-env-proxy" if config.download.use_env_proxy else "--no-use-env-proxy")
+    cmd.append("--juliang-enabled" if config.download.juliang_enabled else "--no-juliang-enabled")
+    if config.download.juliang_trade_no:
+        cmd.extend(["--juliang-trade-no", str(config.download.juliang_trade_no)])
+    if config.download.juliang_api_key:
+        cmd.extend(["--juliang-api-key", str(config.download.juliang_api_key)])
+    if config.download.juliang_proxy_username:
+        cmd.extend(["--juliang-proxy-username", str(config.download.juliang_proxy_username)])
+    if config.download.juliang_proxy_password:
+        cmd.extend(["--juliang-proxy-password", str(config.download.juliang_proxy_password)])
+    cmd.extend(["--juliang-api-base", str(config.download.juliang_api_base)])
+    cmd.extend(["--juliang-proxy-type", str(config.download.juliang_proxy_type)])
+    cmd.extend(
+        ["--juliang-lease-refresh-margin-seconds", str(config.download.juliang_lease_refresh_margin_seconds)]
+    )
+    cmd.extend(["--juliang-default-lease-seconds", str(config.download.juliang_default_lease_seconds)])
     if not config.logging.console:
         cmd.append("--no-console-log")
     if config.download.end_date:
@@ -91,7 +95,7 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
         cmd.extend(config.download.extra_symbols)
     LOGGER.info(
         "Running download step start_date=%s end_date=%s raw_dir=%s workers=%s log_file=%s report_file=%s",
-        refresh_start_date,
+        start_date,
         config.download.end_date,
         config.paths.raw_daily_dir,
         config.download.max_workers,
@@ -103,7 +107,7 @@ def run_download_step(config: AppConfig) -> dict[str, object]:
     return {
         "command": cmd,
         "raw_daily_dir": str(config.paths.raw_daily_dir),
-        "refresh_start_date": refresh_start_date,
+        "refresh_start_date": start_date,
         "log_file": str(log_file) if log_file is not None else None,
         "report_file": str(report_file) if report_file is not None else None,
         "eastmoney_cookie_cache_file": str(cookie_cache_file) if cookie_cache_file is not None else None,

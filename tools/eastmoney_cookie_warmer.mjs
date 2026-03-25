@@ -63,7 +63,7 @@ async function blockNonEssentialAssets(page) {
   });
 }
 
-async function warmCookies({ browserPath, proxy, timeoutMs }) {
+async function warmCookies({ browserPath, proxy, proxyUsername, proxyPassword, timeoutMs }) {
   const launchArgs = [
     "--no-first-run",
     "--disable-gpu",
@@ -89,6 +89,12 @@ async function warmCookies({ browserPath, proxy, timeoutMs }) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 720 });
     await page.setUserAgent(USER_AGENT);
+    if (proxyUsername || proxyPassword) {
+      await page.authenticate({
+        username: proxyUsername || "",
+        password: proxyPassword || "",
+      });
+    }
     await blockNonEssentialAssets(page);
     await page.goto(TARGET_URL, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page.waitForFunction(
@@ -119,12 +125,14 @@ async function main() {
   const timeoutMs = toPositiveInt(args.get("timeout-ms"), DEFAULT_TIMEOUT_MS);
   const browserPath = args.get("browser-path") || detectBrowserPath();
   const proxy = args.get("proxy") || null;
+  const proxyUsername = args.get("proxy-username") || null;
+  const proxyPassword = args.get("proxy-password") || null;
 
   if (!browserPath) {
     throw new Error("No Chrome/Chromium executable found. Pass --browser-path or set EASTMONEY_BROWSER_PATH.");
   }
 
-  const payload = await warmCookies({ browserPath, proxy, timeoutMs });
+  const payload = await warmCookies({ browserPath, proxy, proxyUsername, proxyPassword, timeoutMs });
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 

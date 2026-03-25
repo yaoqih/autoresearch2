@@ -62,6 +62,63 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(config.download.eastmoney_browser_proxy, "http://127.0.0.1:7890")
             self.assertEqual(config.download.eastmoney_cookie_timeout_ms, 9000)
 
+    def test_load_config_reads_juliang_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "paths:",
+                        "  raw_daily_dir: data/daily",
+                        "download:",
+                        "  juliang_enabled: true",
+                        "  juliang_api_base: http://v2.api.juliangip.com",
+                        "  juliang_proxy_type: 2",
+                        "  juliang_lease_refresh_margin_seconds: 7",
+                        "  juliang_default_lease_seconds: 35",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+            self.assertTrue(config.download.juliang_enabled)
+            self.assertEqual(config.download.juliang_api_base, "http://v2.api.juliangip.com")
+            self.assertEqual(config.download.juliang_proxy_type, 2)
+            self.assertEqual(config.download.juliang_lease_refresh_margin_seconds, 7)
+            self.assertEqual(config.download.juliang_default_lease_seconds, 35)
+
+    def test_load_config_defaults_cookie_warmup_off(self) -> None:
+        config = load_config()
+        self.assertFalse(config.download.eastmoney_cookie_warmup)
+        self.assertEqual(config.download.max_workers, 0)
+        self.assertEqual(config.download.host_max_workers, 4)
+        self.assertEqual(config.download.max_retries, 2)
+        self.assertEqual(config.download.request_interval, 0.0)
+        self.assertEqual(config.download.request_jitter, 0.0)
+
+    def test_load_config_reads_deployment_epochs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "paths:",
+                        "  raw_daily_dir: data/daily",
+                        "training:",
+                        "  deployment_epochs: 7",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+            self.assertEqual(getattr(config.training, "deployment_epochs", None), 7)
+
 
 if __name__ == "__main__":
     unittest.main()

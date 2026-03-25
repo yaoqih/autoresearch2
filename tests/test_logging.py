@@ -93,9 +93,35 @@ class LoggingIntegrationTest(unittest.TestCase):
             self.assertIn("--eastmoney-cookie-timeout-ms", cmd)
             self.assertIn("7000", cmd)
 
+    def test_run_download_step_passes_juliang_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.download.juliang_enabled = True
+            config.download.juliang_api_base = "http://v2.api.juliangip.com"
+            config.download.juliang_proxy_type = 2
+            config.download.juliang_lease_refresh_margin_seconds = 9
+            config.download.juliang_default_lease_seconds = 31
+
+            with patch("quant_impl.pipelines.daily.subprocess.run") as run_mock:
+                run_mock.return_value = object()
+                run_download_step(config)
+
+            cmd = run_mock.call_args.args[0]
+            self.assertIn("--juliang-enabled", cmd)
+            self.assertIn("--juliang-api-base", cmd)
+            self.assertIn("http://v2.api.juliangip.com", cmd)
+            self.assertIn("--juliang-proxy-type", cmd)
+            self.assertIn("2", cmd)
+            self.assertIn("--juliang-lease-refresh-margin-seconds", cmd)
+            self.assertIn("9", cmd)
+            self.assertIn("--juliang-default-lease-seconds", cmd)
+            self.assertIn("31", cmd)
+
     def test_load_config_reads_default_use_env_proxy_setting(self) -> None:
         config = load_config()
         self.assertFalse(config.download.use_env_proxy)
+        self.assertFalse(config.download.eastmoney_cookie_warmup)
 
     def test_parser_accepts_logging_overrides_after_subcommand(self) -> None:
         parser = build_parser()
@@ -103,6 +129,12 @@ class LoggingIntegrationTest(unittest.TestCase):
         self.assertEqual(args.command, "download")
         self.assertEqual(args.log_level, "DEBUG")
         self.assertEqual(args.log_file, "logs/custom.log")
+
+    def test_parser_accepts_train_deploy_only_flag(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["train", "--deploy-only"])
+        self.assertEqual(args.command, "train")
+        self.assertTrue(args.deploy_only)
 
 
 if __name__ == "__main__":

@@ -4,9 +4,9 @@
 
 这个仓库不是研究 runner，而是面向实施和日常运行的量化工程版本。它把研究期已经确认的核心协议固定下来，并补齐了生产侧真正需要的几条链路：
 
-- 数据获取：主入口是 `PYTHONPATH=src python -m quant_impl.cli download`，底层复用 [`download_stock.py`](./download_stock.py)，默认单线程、低速率、可续传。
+- 数据获取：主入口是 `PYTHONPATH=src python -m quant_impl.cli download`，底层复用 [`download_stock.py`](./download_stock.py)，默认直连保守运行；开启巨量后自动切到“单代理提取 + 并发复用”模式，并保留可续传。
 - 数据整理：将单票 parquet 合并为市场级 parquet，再构建训练和推理共用的 bundle。
-- 模型训练：固定为 `lc96 + rank_center + train-only abs(target)<=10% + full5y`。
+- 模型训练：walk-forward 评估固定为 `lc96 + rank_center + train-only abs(target)<=10% + full5y`，最终 deployment 模型回训最近一个 `5y train + 1y valid` 窗口，固定 `5` 个 epoch 且不做 early stop。
 - 每日任务：增量抓数、面板刷新、预测归档、历史预测回填验证。
 - 统一日志：下载、合并、prepare、train、predict、validate、daily 全部接入统一日志目录和命令级日志文件。
 
@@ -91,7 +91,9 @@ pip install akshare
 
 ### 3. 可选：安装 Eastmoney 最小 Cookie 预热器
 
-当 `push2his.eastmoney.com` 直连经常出现“远端直接断开连接”时，建议开启最小 Cookie 预热。这个实现不是常驻浏览器抓数，而是：
+默认情况下，下载器不会启用 Cookie 预热。只有当你确认当前线路确实需要浏览器侧会话初始化时，再显式打开它。
+
+这个实现不是常驻浏览器抓数，而是：
 
 1. 用系统 Chrome/Chromium 打开一次 `quote.eastmoney.com`
 2. 只取 `nid18` / `nid18_create_time`
@@ -184,7 +186,7 @@ PYTHONPATH=src python -m quant_impl.cli prepare --force
 ### 2. 训练模型
 
 ```bash
-PYTHONPATH=src python -m quant_impl.cli train --profile screen --device cuda:3
+PYTHONPATH=src python -m quant_impl.cli train  --device mps --deploy-only
 ```
 
 推荐：
@@ -283,7 +285,13 @@ PYTHONPATH=src python -m quant_impl.cli download --log-level DEBUG
 - `eastmoney_cookie_cache_file`
 - `eastmoney_browser_path`
 - `eastmoney_browser_proxy`
+- `juliang_enabled`
+- `juliang_api_base`
+- `juliang_proxy_type`
+- `juliang_lease_refresh_margin_seconds`
+- `juliang_default_lease_seconds`
 - `max_workers`
+- `host_max_workers`
 - `request_interval`
 - `request_jitter`
 - `retry_sleep`
@@ -310,7 +318,42 @@ PYTHONPATH=src python -m quant_impl.cli download --log-level DEBUG
 - `artifacts/logs/download_report.jsonl`
   - 每只股票最终是成功、空返回还是疑似被拒
 
-如果 Eastmoney 需要预热 Cookie，推荐在配置里显式开启：
+如果要启用巨量动态代理，推荐把敏感信息放进仓库根目录 `.env`：
+
+```bash
+JULIANG_TRADE_NO=1765244755300652
+JULIANG_API_KEY=your-api-key
+JULIANG_PROXY_USERNAME=your-proxy-username
+JULIANG_PROXY_PASSWORD=your-proxy-password
+```
+
+然后在配置里只保留行为开关：
+
+```yaml
+download:
+  juliang_enabled: true
+  juliang_api_base: http://v2.api.juliangip.com
+  juliang_proxy_type: 1
+  juliang_lease_refresh_margin_seconds: 5
+  juliang_default_lease_seconds: 30
+  max_workers: 0
+  host_max_workers: 8
+  max_retries: 2
+  request_interval: 0.0
+  request_jitter: 0.0
+```
+
+当前代理策略是：
+
+- 单次只维护一个活动巨量代理
+- 提取时默认带 `auto_white=1`，优先让巨量自动把当前出口 IP 加进白名单
+- 所有 worker 在租约窗口内并发复用这一个代理
+- HTTP 连接池会随 worker 数放大，避免默认 `requests` 连接池过小
+- 接近租约末尾或出现代理层失败时才重新提取
+- `max_workers: 0` 时会自动选择 worker 数
+- 自动模式下：不开代理默认 1 线程，开启巨量默认放大到 `host_max_workers`
+
+如果你确实要启用 Eastmoney Cookie 预热，推荐在配置里显式开启：
 
 ```yaml
 download:
@@ -329,7 +372,16 @@ download:
 - 直连：`use_env_proxy: false`，`eastmoney_browser_proxy: null`
 - 继承环境代理：`use_env_proxy: true` 且不单独设置 `eastmoney_browser_proxy` 时，预热器会优先读取 `HTTPS_PROXY` / `HTTP_PROXY`
 - 单独给浏览器指定代理：直接设置 `eastmoney_browser_proxy`
-- 下载阶段继续走代理池：保持现有 KDL 配置不变；Cookie 预热只是抓数前的一次轻量会话初始化，不改变代理池的调度逻辑
+- 开启巨量代理但不单独设置浏览器代理时，预热器会复用当前活动代理及其账号密码
+- 预热失败不会阻断下载主流程；日志会给出警告，但抓数仍然继续
+
+日志排查建议：
+
+- `category=proxy_transport`
+  - 说明失败发生在代理连接、TLS、代理认证或隧道阶段
+- `category=target_site`
+  - 说明已经拿到了目标站点响应，但内容或状态更像是 Eastmoney 侧拒绝/限流
+- 最终 `failed` 结果也会把 `failure_category` 和 `last_status_code` 写进 `download_report.jsonl`
 
 ### `merge`
 
@@ -367,6 +419,9 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
   - `screen`：快速试跑，fold 和 epoch 都更少
   - `probe`：中等规模检查
   - `full`：完整训练
+- `--deploy-only`
+  - 跳过 walk-forward folds，只训练最终 deployment 模型
+  - 口径为最近 `train_days` 窗口全量训练，不切 `valid`，直接使用最后一个 epoch 的权重
 - `--device`
   - 如 `cpu`、`cuda:0`、`cuda:3`
 - `--force-prepare`
@@ -386,6 +441,8 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
 - `target_transform = rank_center`
 - `train_target_abs_cap = 0.10`
 - `temporal_mode = full5y`
+- `deployment_training_config.epochs = training.deployment_epochs`
+- `deployment_training_config.early_stopping_enabled = false`
 
 ### `predict`
 
@@ -490,17 +547,17 @@ python download_stock.py \
 - `--parquet-dir`
   - 单票 parquet 输出目录
 - `--max-workers`
-  - 下载线程数，默认建议保持 `1`
+  - 下载线程数；`0` 表示自动
 - `--host-max-workers`
-  - 本机线程上限，默认 `1`
+  - 本机线程上限；自动模式下巨量代理最多并发到这里
 - `--max-retries`
-  - 单请求最大重试次数
+  - 单请求首次失败后的额外重试次数
 - `--timeout`
   - 单请求超时时间
 - `--request-interval`
-  - 每次请求之间的最小间隔秒数
+  - 每次请求之间的最小间隔秒数；默认 `0.0`
 - `--request-jitter`
-  - 随机额外等待，降低固定节奏访问风险
+  - 随机额外等待；默认 `0.0`
 - `--retry-sleep`
   - 请求失败后的基础回退秒数
 - `--force`
@@ -537,6 +594,16 @@ python download_stock.py \
   - 传给浏览器的代理地址
 - `--eastmoney-cookie-timeout-ms`
   - 预热超时时间，单位毫秒
+- `--juliang-enabled`
+  - 开启巨量动态代理提取
+- `--juliang-api-base`
+  - 巨量 API 根地址
+- `--juliang-proxy-type`
+  - 代理类型：`1=HTTP(S)`，`2=SOCKS`
+- `--juliang-lease-refresh-margin-seconds`
+  - 距离代理到期多少秒时提前切换
+- `--juliang-default-lease-seconds`
+  - 取不到剩余时长时使用的保守默认值
 
 手动验证预热器时，可以先单独执行：
 
@@ -621,6 +688,7 @@ python download_stock.py \
 - `download.symbols_file`
 - `download.start_date`
 - `download.max_workers`
+- `download.host_max_workers`
 - `paths.*`
 - `inference.prediction_name`
 

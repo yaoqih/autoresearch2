@@ -64,7 +64,7 @@ download:
   use_env_proxy: false
 
   # 是否在抓数前用系统 Chrome/Chromium 预热最小 Eastmoney Cookie。
-  eastmoney_cookie_warmup: true
+  eastmoney_cookie_warmup: false
 
   # 预热得到的最小 Cookie 缓存文件。
   eastmoney_cookie_cache_file: artifacts/cache/eastmoney_cookie.json
@@ -87,23 +87,53 @@ download:
   # Cookie 预热超时时间，单位毫秒。
   eastmoney_cookie_timeout_ms: 15000
 
-  # 下载线程数。默认建议保持 1，先稳住而不是追求速度。
-  max_workers: 1
+  # 是否启用巨量动态代理提取。
+  juliang_enabled: true
 
-  # 本机线程上限。即使 max_workers 更高，也会被这里截断。
-  host_max_workers: 1
+  # 可选：巨量订单业务编号。默认建议从 .env 读取。
+  juliang_trade_no: null
 
-  # 单请求最大重试次数。
-  max_retries: 1
+  # 可选：巨量 API 密钥。默认建议从 .env 读取。
+  juliang_api_key: null
+
+  # 可选：巨量代理账号。默认建议从 .env 读取。
+  juliang_proxy_username: null
+
+  # 可选：巨量代理密码。默认建议从 .env 读取。
+  juliang_proxy_password: null
+
+  # 巨量 API 根地址。
+  juliang_api_base: http://v2.api.juliangip.com
+
+  # 代理类型：1=HTTP(S)，2=SOCKS。
+  juliang_proxy_type: 1
+
+  # 距离租约到期多少秒时提前刷新代理。
+  juliang_lease_refresh_margin_seconds: 1
+
+  # 查询不到剩余时长时使用的保守默认值。
+  juliang_default_lease_seconds: 30
+
+  # 下载线程数。0 表示自动：
+  # - 开启巨量代理时，默认启用“单代理提取后并发复用”
+  # - 不开代理时，默认退回保守单线程
+  max_workers: 0
+
+  # 本机线程上限。巨量单代理并发复用时，自动模式最多放大到这里。
+  host_max_workers: 4
+
+  # 单请求失败后的额外重试次数。
+  max_retries: 2
 
   # 单请求超时时间，单位秒。
-  timeout: 20.0
+  timeout: 10.0
 
   # 每次 HTTP 请求之间的最小间隔秒数。
-  request_interval: 10
+  # 巨量单代理模式默认不额外串行限速，尽量把 30-60s 窗口用满。
+  request_interval: 0.0
 
   # 额外随机等待，降低固定节奏访问风险。
-  request_jitter: 0.2
+  request_jitter: 0.0
 
   # 请求失败后的基础退避秒数。
   retry_sleep: 1.5
@@ -243,6 +273,9 @@ training:
 
   # 最大 epoch 数。
   epochs: 18
+
+  # 最终 deployment 模型回训的 epoch 数。
+  deployment_epochs: 6
 
   # 每个 batch 由多少个交易日组成。
   batch_days: 20

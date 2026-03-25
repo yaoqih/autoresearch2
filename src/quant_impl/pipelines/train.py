@@ -162,13 +162,21 @@ def fit_one_window(
     *,
     seed_base: int,
     window_name: str,
+    epochs_override: int | None = None,
+    enable_early_stopping: bool = True,
+    select_checkpoint_on_valid: bool = True,
 ) -> tuple[CrossSectionalRanker, dict[str, object]]:
+    configured_epochs = epochs_override if epochs_override is not None else config.training.epochs
+    uses_validation = bool(valid_day_indices) and select_checkpoint_on_valid
     LOGGER.info(
-        "Training window start name=%s train_days=%s valid_days=%s device=%s",
+        "Training window start name=%s train_days=%s valid_days=%s device=%s epochs=%s early_stopping=%s select_checkpoint_on_valid=%s",
         window_name,
         len(train_day_indices),
         len(valid_day_indices),
         device,
+        configured_epochs,
+        enable_early_stopping,
+        select_checkpoint_on_valid,
     )
     linear_weights = compute_linear_ic_weights(bundle, config.data, config.training, train_day_indices)
     model = CrossSectionalRanker(bundle["features"].shape[1], config.model, linear_weights).to(device)
@@ -189,7 +197,7 @@ def fit_one_window(
     autocast_enabled = device.type == "cuda"
     autocast_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
 
-    for epoch in range(1, config.training.epochs + 1):
+    for epoch in range(1, configured_epochs + 1):
         model.train()
         epoch_losses = []
         for batch in make_day_batches(
@@ -233,65 +241,103 @@ def fit_one_window(
                 }
             )
 
-        valid_eval = evaluate_ranker(
-            model,
-            bundle,
-            config.data,
-            valid_day_indices,
-            device,
-            top_k=config.inference.top_k,
-            batch_days=config.training.batch_days,
-        )
-        valid_score = valid_eval["metrics"]["selection_score"]
-        history.append(
-            {
-                "epoch": epoch,
-                "train_loss": float(np.mean([item["loss"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_listwise_loss": float(np.mean([item["listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_pairwise_loss": float(np.mean([item["pairwise"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_huber_loss": float(np.mean([item["huber"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_binary_loss": float(np.mean([item["binary"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_winner_loss": float(np.mean([item["winner"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "train_rerank_listwise_loss": float(np.mean([item["rerank_listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
-                "valid_selection_score": valid_score,
-                "valid_mean_return": valid_eval["metrics"]["mean_return"],
-                "valid_mean_alpha": valid_eval["metrics"]["mean_alpha"],
-            }
-        )
-        LOGGER.info(
-            "Window epoch name=%s epoch=%s/%s train_loss=%.6f valid_selection=%.6f valid_alpha=%.6f",
-            window_name,
-            epoch,
-            config.training.epochs,
-            history[-1]["train_loss"],
-            valid_score,
-            valid_eval["metrics"]["mean_alpha"],
-        )
-        if valid_score > best_valid:
-            best_valid = valid_score
-            best_epoch = epoch
-            best_state = _clone_state_dict(model)
-            best_metrics = valid_eval
-            patience = 0
+        history_item = {
+            "epoch": epoch,
+            "train_loss": float(np.mean([item["loss"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_listwise_loss": float(np.mean([item["listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_pairwise_loss": float(np.mean([item["pairwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_huber_loss": float(np.mean([item["huber"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_binary_loss": float(np.mean([item["binary"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_winner_loss": float(np.mean([item["winner"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_rerank_listwise_loss": float(np.mean([item["rerank_listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "valid_selection_score": None,
+            "valid_mean_return": None,
+            "valid_mean_alpha": None,
+        }
+        if uses_validation:
+            valid_eval = evaluate_ranker(
+                model,
+                bundle,
+                config.data,
+                valid_day_indices,
+                device,
+                top_k=config.inference.top_k,
+                batch_days=config.training.batch_days,
+            )
+            valid_score = valid_eval["metrics"]["selection_score"]
+            history_item["valid_selection_score"] = valid_score
+            history_item["valid_mean_return"] = valid_eval["metrics"]["mean_return"]
+            history_item["valid_mean_alpha"] = valid_eval["metrics"]["mean_alpha"]
+            LOGGER.info(
+                "Window epoch name=%s epoch=%s/%s train_loss=%.6f valid_selection=%.6f valid_alpha=%.6f",
+                window_name,
+                epoch,
+                configured_epochs,
+                history_item["train_loss"],
+                valid_score,
+                valid_eval["metrics"]["mean_alpha"],
+            )
+            if valid_score > best_valid:
+                best_valid = valid_score
+                best_epoch = epoch
+                best_state = _clone_state_dict(model)
+                best_metrics = valid_eval
+                patience = 0
+            else:
+                patience += 1
+                if enable_early_stopping and patience >= config.training.early_stopping_patience:
+                    history.append(history_item)
+                    LOGGER.info(
+                        "Window early stop name=%s epoch=%s patience=%s",
+                        window_name,
+                        epoch,
+                        config.training.early_stopping_patience,
+                    )
+                    break
         else:
-            patience += 1
-            if patience >= config.training.early_stopping_patience:
-                LOGGER.info(
-                    "Window early stop name=%s epoch=%s patience=%s",
-                    window_name,
-                    epoch,
-                    config.training.early_stopping_patience,
-                )
-                break
+            LOGGER.info(
+                "Window epoch name=%s epoch=%s/%s train_loss=%.6f",
+                window_name,
+                epoch,
+                configured_epochs,
+                history_item["train_loss"],
+            )
+        history.append(history_item)
 
-    model.load_state_dict(best_state)
-    LOGGER.info(
-        "Training window finished name=%s best_epoch=%s best_selection=%.6f",
-        window_name,
-        best_epoch,
-        best_valid,
-    )
+    if uses_validation:
+        model.load_state_dict(best_state)
+        LOGGER.info(
+            "Training window finished name=%s best_epoch=%s best_selection=%.6f",
+            window_name,
+            best_epoch,
+            best_valid,
+        )
+    else:
+        best_epoch = configured_epochs if history else 0
+        best_metrics = None
+        LOGGER.info(
+            "Training window finished name=%s final_epoch=%s checkpoint=last_epoch",
+            window_name,
+            best_epoch,
+        )
+    train_start_index = train_day_indices[0] if train_day_indices else 0
+    train_end_index = train_day_indices[-1] + 1 if train_day_indices else 0
+    valid_start_index = valid_day_indices[0] if valid_day_indices else 0
+    valid_end_index = valid_day_indices[-1] + 1 if valid_day_indices else 0
     return model, {
+        "window_name": window_name,
+        "configured_epochs": configured_epochs,
+        "early_stopping_enabled": enable_early_stopping,
+        "train_days": len(train_day_indices),
+        "valid_days": len(valid_day_indices),
+        "train_start_index": train_start_index,
+        "train_end_index": train_end_index,
+        "valid_start_index": valid_start_index,
+        "valid_end_index": valid_end_index,
+        "train_start_date": bundle["dates"][train_start_index] if train_day_indices else None,
+        "train_end_date": bundle["dates"][train_end_index - 1] if train_day_indices else None,
+        "valid_start_date": bundle["dates"][valid_start_index] if valid_day_indices else None,
+        "valid_end_date": bundle["dates"][valid_end_index - 1] if valid_day_indices else None,
         "best_epoch": best_epoch,
         "best_valid_metrics": best_metrics,
         "history": history,
@@ -361,14 +407,16 @@ def train_pipeline(
     *,
     device: str | None = None,
     profile: str = "full",
+    deploy_only: bool = False,
     force_prepare: bool = False,
     limit_stocks: int | None = None,
 ) -> dict[str, object]:
     runtime_config, max_folds = config_for_profile(config, profile)
     seed_everything(runtime_config.training.seed)
     LOGGER.info(
-        "Train pipeline start profile=%s device=%s force_prepare=%s limit_stocks=%s seed=%s",
+        "Train pipeline start profile=%s deploy_only=%s device=%s force_prepare=%s limit_stocks=%s seed=%s",
         profile,
+        deploy_only,
         device,
         force_prepare,
         limit_stocks,
@@ -383,80 +431,97 @@ def train_pipeline(
     )
     build_market_cache(runtime_config, force=force_prepare, limit_stocks=limit_stocks)
     bundle = load_market_bundle(runtime_config, force=False, limit_stocks=limit_stocks)
-    splits = build_walk_forward_splits(bundle, runtime_config.data)
-    if max_folds is not None:
+    splits = [] if deploy_only else build_walk_forward_splits(bundle, runtime_config.data)
+    if max_folds is not None and not deploy_only:
         splits = splits[-max_folds:]
     device_obj = resolve_device(device)
     LOGGER.info(
-        "Training bundle loaded assets=%s days=%s features=%s folds=%s resolved_device=%s",
+        "Training bundle loaded assets=%s days=%s features=%s folds=%s resolved_device=%s deploy_only=%s",
         len(bundle["assets"]),
         len(bundle["dates"]),
         len(bundle["feature_names"]),
         len(splits),
         device_obj,
+        deploy_only,
     )
 
     fold_summaries = []
-    for split in splits:
-        fold_seed = runtime_config.training.seed + split.fold_id
-        seed_everything(fold_seed)
+    if deploy_only:
+        LOGGER.info("Deploy-only mode enabled; skipping walk-forward cross-validation")
+        summary = None
+    else:
+        for split in splits:
+            fold_seed = runtime_config.training.seed + split.fold_id
+            seed_everything(fold_seed)
+            LOGGER.info(
+                "Fold start fold_id=%s seed=%s train=%s..%s valid=%s..%s holdout=%s..%s",
+                split.fold_id,
+                fold_seed,
+                split.train_start_date,
+                split.train_end_date,
+                split.valid_start_date,
+                split.valid_end_date,
+                split.holdout_start_date,
+                split.holdout_end_date,
+            )
+            train_day_indices = list(range(split.train_start, split.train_end))
+            valid_day_indices = list(range(split.valid_start, split.valid_end))
+            holdout_day_indices = list(range(split.holdout_start, split.holdout_end))
+            model, fit_summary = fit_one_window(
+                bundle,
+                runtime_config,
+                device_obj,
+                train_day_indices,
+                valid_day_indices,
+                seed_base=fold_seed,
+                window_name=f"fold-{split.fold_id}",
+            )
+            holdout_eval = evaluate_ranker(
+                model,
+                bundle,
+                runtime_config.data,
+                holdout_day_indices,
+                device_obj,
+                top_k=runtime_config.inference.top_k,
+                batch_days=runtime_config.training.batch_days,
+            )
+            fold_summaries.append(
+                {
+                    "split": asdict(split),
+                    "fit": fit_summary,
+                    "valid": fit_summary["best_valid_metrics"],
+                    "holdout": holdout_eval,
+                }
+            )
+            LOGGER.info(
+                "Fold finished fold_id=%s holdout_selection=%.6f holdout_alpha=%.6f",
+                split.fold_id,
+                holdout_eval["metrics"]["selection_score"],
+                holdout_eval["metrics"]["mean_alpha"],
+            )
+
+        summary = _build_training_summary(runtime_config, fold_summaries)
         LOGGER.info(
-            "Fold start fold_id=%s seed=%s train=%s..%s valid=%s..%s holdout=%s..%s",
-            split.fold_id,
-            fold_seed,
-            split.train_start_date,
-            split.train_end_date,
-            split.valid_start_date,
-            split.valid_end_date,
-            split.holdout_start_date,
-            split.holdout_end_date,
-        )
-        train_day_indices = list(range(split.train_start, split.train_end))
-        valid_day_indices = list(range(split.valid_start, split.valid_end))
-        holdout_day_indices = list(range(split.holdout_start, split.holdout_end))
-        model, fit_summary = fit_one_window(
-            bundle,
-            runtime_config,
-            device_obj,
-            train_day_indices,
-            valid_day_indices,
-            seed_base=fold_seed,
-            window_name=f"fold-{split.fold_id}",
-        )
-        holdout_eval = evaluate_ranker(
-            model,
-            bundle,
-            runtime_config.data,
-            holdout_day_indices,
-            device_obj,
-            top_k=runtime_config.inference.top_k,
-            batch_days=runtime_config.training.batch_days,
-        )
-        fold_summaries.append(
-            {
-                "split": asdict(split),
-                "fit": fit_summary,
-                "valid": fit_summary["best_valid_metrics"],
-                "holdout": holdout_eval,
-            }
-        )
-        LOGGER.info(
-            "Fold finished fold_id=%s holdout_selection=%.6f holdout_alpha=%.6f",
-            split.fold_id,
-            holdout_eval["metrics"]["selection_score"],
-            holdout_eval["metrics"]["mean_alpha"],
+            "Cross-validation summary research_score=%.6f holdout_selection=%.6f",
+            summary["research_score"],
+            summary["cv_holdout_selection_score"],
         )
 
-    summary = _build_training_summary(runtime_config, fold_summaries)
-    LOGGER.info(
-        "Cross-validation summary research_score=%.6f holdout_selection=%.6f",
-        summary["research_score"],
-        summary["cv_holdout_selection_score"],
-    )
-
-    deployment_valid_days = min(runtime_config.data.valid_days, len(bundle["dates"]) // 5)
-    deployment_train_days = list(range(0, max(1, len(bundle["dates"]) - deployment_valid_days)))
-    deployment_valid_indices = list(range(max(1, len(bundle["dates"]) - deployment_valid_days), len(bundle["dates"])))
+    if deploy_only:
+        deployment_valid_start = len(bundle["dates"])
+        if runtime_config.data.rolling_train:
+            deployment_train_start = max(0, len(bundle["dates"]) - runtime_config.data.train_days)
+        else:
+            deployment_train_start = 0
+        deployment_valid_indices = []
+    else:
+        deployment_valid_start = max(1, len(bundle["dates"]) - runtime_config.data.valid_days)
+        if runtime_config.data.rolling_train:
+            deployment_train_start = max(0, deployment_valid_start - runtime_config.data.train_days)
+        else:
+            deployment_train_start = 0
+        deployment_valid_indices = list(range(deployment_valid_start, len(bundle["dates"])))
+    deployment_train_days = list(range(deployment_train_start, deployment_valid_start))
     deployment_seed = runtime_config.training.seed + len(splits)
     seed_everything(deployment_seed)
     deployment_model, deployment_fit = fit_one_window(
@@ -467,10 +532,17 @@ def train_pipeline(
         deployment_valid_indices,
         seed_base=deployment_seed,
         window_name="deployment",
+        epochs_override=runtime_config.training.deployment_epochs,
+        enable_early_stopping=False,
+        select_checkpoint_on_valid=not deploy_only,
     )
+    deployment_training_config = asdict(runtime_config.training)
+    deployment_training_config["epochs"] = runtime_config.training.deployment_epochs
+    deployment_training_config["early_stopping_enabled"] = False
     artifact = {
         "created_at": utc_timestamp(),
         "profile": profile,
+        "deploy_only": deploy_only,
         "champion_spec": {
             "member_config": runtime_config.training.member_config,
             "temporal_mode": runtime_config.training.temporal_mode,
@@ -482,6 +554,7 @@ def train_pipeline(
         "model_config": asdict(runtime_config.model),
         "data_config": asdict(runtime_config.data),
         "training_config": asdict(runtime_config.training),
+        "deployment_training_config": deployment_training_config,
         "state_dict": deployment_model.state_dict(),
         "summary": summary,
         "deployment_fit": deployment_fit,
@@ -492,9 +565,11 @@ def train_pipeline(
     result = {
         "model_path": str(runtime_config.model_path),
         "profile": profile,
+        "deploy_only": deploy_only,
         "summary": summary,
         "folds": fold_summaries,
         "deployment_fit": deployment_fit,
+        "deployment_training_config": deployment_training_config,
         "champion_spec": artifact["champion_spec"],
     }
     write_json(runtime_config.training_metrics_path, result)

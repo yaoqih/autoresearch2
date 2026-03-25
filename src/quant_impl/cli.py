@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_logging_args(train)
     train.add_argument("--device", default=None)
     train.add_argument("--profile", choices=["full", "probe", "screen"], default="full")
+    train.add_argument("--deploy-only", action="store_true")
     train.add_argument("--force-prepare", action="store_true")
     train.add_argument("--limit-stocks", type=int, default=None)
     train.set_defaults(command="train")
@@ -100,6 +101,7 @@ def main() -> None:
             config,
             device=args.device,
             profile=args.profile,
+            deploy_only=args.deploy_only,
             force_prepare=args.force_prepare,
             limit_stocks=args.limit_stocks,
         )

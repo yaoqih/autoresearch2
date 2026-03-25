@@ -119,8 +119,12 @@ def canonicalize_raw_frame(frame: pd.DataFrame, fallback_symbol: str) -> pd.Data
     rename_map = {
         "pct_change": "pct_chg",
         "turnover": "turnover_rate",
-        "money": "amount",
     }
+    if "money" in working.columns:
+        if "amount" in working.columns:
+            working = working.drop(columns=["money"])
+        else:
+            rename_map["money"] = "amount"
     working = working.rename(columns=rename_map)
     missing = [column for column in BASE_COLUMNS if column not in working.columns]
     if missing:
