@@ -4,6 +4,10 @@ import SiteShell from "../components/SiteShell.astro";
 import StatusPill from "../components/StatusPill.astro";
 import StockLink from "../components/StockLink.astro";
 import {
+  buildDailyReturnSeries,
+  buildNavSeries,
+  displayPrimaryCode,
+  executionSummary,
   formatDisplayDate,
   formatSignedPercent,
   loadPredictionIndex,
@@ -11,6 +15,8 @@ import {
 } from "../lib/predictions.mjs";
 
 const history = await loadPredictionIndex();
+const returnSeries = buildDailyReturnSeries(history);
+const navSeries = buildNavSeries(history);
 
 function toneClass(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -18,39 +24,238 @@ function toneClass(value) {
   }
   return Number(value) >= 0 ? "tone-positive" : "tone-negative";
 }
+
+function compactDate(dateText) {
+  return typeof dateText === "string" ? dateText.slice(5) : "";
+}
+
+function buildReturnChart(series) {
+  const width = 920;
+  const height = 260;
+  const padLeft = 22;
+  const padRight = 18;
+  const padTop = 20;
+  const padBottom = 28;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+  const baselineY = padTop + plotHeight / 2;
+  const maxAbs = Math.max(0.01, ...series.map((item) => Math.abs(item.value)));
+  const slotWidth = series.length ? plotWidth / series.length : plotWidth;
+  const barWidth = Math.max(2, Math.min(18, slotWidth * 0.72));
+  const bars = series.map((item, index) => {
+    const x = padLeft + slotWidth * index + (slotWidth - barWidth) / 2;
+    const magnitude = (Math.abs(item.value) / maxAbs) * (plotHeight / 2 - 6);
+    const y = item.value >= 0 ? baselineY - magnitude : baselineY;
+    return {
+      ...item,
+      x,
+      y,
+      width: barWidth,
+      height: Math.max(2, magnitude),
+      tone: item.value >= 0 ? "positive" : "negative",
+    };
+  });
+  return {
+    width,
+    height,
+    baselineY,
+    maxAbs,
+    startDate: series[0]?.date ?? null,
+    endDate: series.at(-1)?.date ?? null,
+    bars,
+  };
+}
+
+function buildLineChart(series) {
+  const width = 920;
+  const height = 260;
+  const padLeft = 22;
+  const padRight = 18;
+  const padTop = 20;
+  const padBottom = 28;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+  const values = series.map((item) => item.value);
+  const minValue = values.length ? Math.min(...values) : 1;
+  const maxValue = values.length ? Math.max(...values) : 1;
+  const span = Math.max(0.0001, maxValue - minValue);
+  const points = series.map((item, index) => {
+    const x = series.length === 1 ? width / 2 : padLeft + (plotWidth * index) / (series.length - 1);
+    const y = padTop + ((maxValue - item.value) / span) * plotHeight;
+    return {
+      ...item,
+      x,
+      y,
+    };
+  });
+  const linePath = points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(" ");
+  const areaPath = points.length
+    ? [
+        `M ${points[0].x.toFixed(2)} ${(height - padBottom).toFixed(2)}`,
+        ...points.map((point) => `L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`),
+        `L ${points.at(-1).x.toFixed(2)} ${(height - padBottom).toFixed(2)}`,
+        "Z",
+      ].join(" ")
+    : "";
+  return {
+    width,
+    height,
+    minValue,
+    maxValue,
+    startDate: series[0]?.date ?? null,
+    endDate: series.at(-1)?.date ?? null,
+    points,
+    linePath,
+    areaPath,
+  };
+}
+
+const returnChart = buildReturnChart(returnSeries);
+const navChart = buildLineChart(navSeries);
+const averageReturn = returnSeries.length
+  ? returnSeries.reduce((sum, item) => sum + item.value, 0) / returnSeries.length
+  : null;
+const latestNav = navSeries.at(-1)?.value ?? null;
 ---
 
 <BaseLayout title="Quant Briefing | 历史预测" description="历史预测与验证结果">
   <SiteShell
     eyebrow="Prediction Ledger"
     title="历史预测"
-    subtitle="按交易日倒序展示官方预测、回填收益与 Alpha。点击任意日期可查看候选明细。"
+    subtitle="先看策略收益曲线，再下钻到每一天的实际执行结果与 Top10 回填明细。"
   >
     {
       history.length ? (
-        <div class="history-grid">
-          {history.map((item) => (
-            <article class="card history-card">
-              <div class="history-meta">
-                <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
-                <StatusPill status={item.status} />
+        <>
+          <div class="chart-grid">
+            <section class="card chart-card">
+              <div class="chart-heading">
+                <div>
+                  <span class="muted-label">Daily Return</span>
+                  <h2>每日收益</h2>
+                </div>
+                <p class={`chart-emphasis ${toneClass(averageReturn)}`}>{formatSignedPercent(averageReturn)}</p>
               </div>
-              <h3>
-                <StockLink code={item.selected_code} />
-              </h3>
-              <p class={`metric-value ${toneClass(item.alpha)}`}>{formatSignedPercent(item.alpha)}</p>
-              <p class="metric-note">选中收益 {formatSignedPercent(item.selected_return)}</p>
-              <p class="metric-note">入场 {item.entry_date} / 出场 {item.exit_date}</p>
-              <p class="history-actions">
-                <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
-              </p>
-            </article>
-          ))}
-        </div>
+              {
+                returnSeries.length ? (
+                  <>
+                    <svg class="performance-chart performance-chart-bars" viewBox={`0 0 ${returnChart.width} ${returnChart.height}`} role="img" aria-label="每日收益图">
+                      <line
+                        x1="0"
+                        x2={returnChart.width}
+                        y1={returnChart.baselineY}
+                        y2={returnChart.baselineY}
+                        class="chart-baseline"
+                      />
+                      {returnChart.bars.map((bar) => (
+                        <rect
+                          x={bar.x}
+                          y={bar.y}
+                          width={bar.width}
+                          height={bar.height}
+                          rx="5"
+                          class={bar.tone === "positive" ? "chart-bar-positive" : "chart-bar-negative"}
+                        />
+                      ))}
+                    </svg>
+                    <div class="chart-caption">
+                      <span>{compactDate(returnChart.startDate)}</span>
+                      <span>均值 {formatSignedPercent(averageReturn)}</span>
+                      <span>{compactDate(returnChart.endDate)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <p>暂无已验证收益，图表会在 `validate` 产出后自动显示。</p>
+                )
+              }
+            </section>
+
+            <section class="card chart-card">
+              <div class="chart-heading">
+                <div>
+                  <span class="muted-label">Net Asset Value</span>
+                  <h2>历史净值</h2>
+                </div>
+                <p class={`chart-emphasis ${toneClass((latestNav ?? 1) - 1)}`}>{latestNav?.toFixed(3) ?? "1.000"}</p>
+              </div>
+              {
+                navSeries.length ? (
+                  <>
+                    <svg class="performance-chart performance-chart-line" viewBox={`0 0 ${navChart.width} ${navChart.height}`} role="img" aria-label="历史净值图">
+                      <defs>
+                        <linearGradient id="nav-fill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stop-color="rgba(31, 90, 69, 0.28)" />
+                          <stop offset="100%" stop-color="rgba(31, 90, 69, 0.02)" />
+                        </linearGradient>
+                      </defs>
+                      {navChart.areaPath && <path d={navChart.areaPath} fill="url(#nav-fill)" />}
+                      {navChart.linePath && <path d={navChart.linePath} class="chart-line" />}
+                      {navChart.points.map((point) => (
+                        <circle cx={point.x} cy={point.y} r="4" class="chart-dot" />
+                      ))}
+                    </svg>
+                    <div class="chart-caption">
+                      <span>{compactDate(navChart.startDate)} 基准 1.000</span>
+                      <span>区间 {navChart.minValue.toFixed(3)} - {navChart.maxValue.toFixed(3)}</span>
+                      <span>{compactDate(navChart.endDate)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <p>暂无已验证净值，图表会在 `validate` 产出后自动显示。</p>
+                )
+              }
+            </section>
+          </div>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <div>
+                <span class="muted-label">Execution Ledger</span>
+                <h2>逐日记录</h2>
+              </div>
+              <p>按交易日倒序展示实际执行结果。若 Top1 开盘涨停，卡片会标出顺延执行。</p>
+            </div>
+            <div class="history-grid">
+              {history.map((item) => {
+                const execution = executionSummary(item);
+                const primaryCode = displayPrimaryCode(item);
+                return (
+                  <article class="card history-card">
+                    <div class="history-meta">
+                      <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
+                      <StatusPill status={item.status} />
+                    </div>
+                    <h3>
+                      <StockLink code={primaryCode} />
+                    </h3>
+                    <p class={`metric-value ${toneClass(item.selected_return)}`}>{formatSignedPercent(item.selected_return)}</p>
+                    <p class="metric-note">Alpha {formatSignedPercent(item.alpha)}</p>
+                    <p class="metric-note">模型 Top1 <StockLink code={item.selected_code} /></p>
+                    {
+                      execution.allTop10Blocked ? (
+                        <p class="execution-note">Top10 全部开盘涨停，当日收益按 0 记。</p>
+                      ) : execution.fallbackApplied ? (
+                        <p class="execution-note">Top1 开盘涨停，实际顺延至 Rank {execution.executedRank}。</p>
+                      ) : (
+                        <p class="execution-note">模型 Top1 直接成交。</p>
+                      )
+                    }
+                    <p class="metric-note">入场 {item.entry_date} / 出场 {item.exit_date}</p>
+                    <p class="history-actions">
+                      <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
+                    </p>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </>
       ) : (
         <section class="card empty-state">
           <h2>历史预测为空</h2>
-          <p>一旦写入 `index.json`，这里会自动显示完整时间序列。</p>
+          <p>一旦写入 `index.json`，这里会自动显示收益图、净值图和逐日执行记录。</p>
         </section>
       )
     }

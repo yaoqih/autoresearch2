@@ -4,6 +4,8 @@ import SiteShell from "../components/SiteShell.astro";
 import StatusPill from "../components/StatusPill.astro";
 import StockLink from "../components/StockLink.astro";
 import {
+  displayPrimaryCode,
+  executionSummary,
   formatDisplayDate,
   formatSignedPercent,
   loadLatestPrediction,
@@ -16,6 +18,9 @@ const history = await loadPredictionIndex();
 const recentHistory = history.slice(0, 6);
 const summary = latest?.summary ?? {};
 const validation = latest?.validation ?? null;
+const execution = latest ? executionSummary(latest) : null;
+const primaryCode = latest ? displayPrimaryCode(latest) : null;
+const primaryScore = validation?.executed_score ?? latest?.selected?.score ?? latest?.selected_score ?? null;
 
 function toneClass(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -28,7 +33,7 @@ function toneClass(value) {
 <BaseLayout title="Quant Briefing | 今日预测" description="今日预测与历史回顾">
   <SiteShell
     title="每日预测简报"
-    subtitle="直接读取本地量化产物，展示当日官方推荐、候选排序，以及回填后的历史偏差与命中情况。"
+    subtitle="首页先看当前官方信号，验证完成后自动切到实际执行口径，并保留模型 Top1 与顺延结果的对照。"
   >
     {
       latest ? (
@@ -37,12 +42,33 @@ function toneClass(value) {
             <span class="muted-label">{formatDisplayDate(latest.as_of_date)}</span>
             <StatusPill status={latest.status} />
             <div class="ticker">
-              <StockLink code={latest.selected?.code ?? latest.selected_code} className="ticker-link" />
+              <StockLink code={primaryCode} className="ticker-link" />
             </div>
-            <p class="score-line">模型分数 {latest.selected?.score?.toFixed(4) ?? latest.selected_score?.toFixed(4)}</p>
+            <p class="score-line">
+              {
+                validation
+                  ? execution?.allTop10Blocked
+                    ? "Top10 全部开盘涨停，收益按 0 记"
+                    : `执行分数 ${primaryScore?.toFixed(4) ?? "N/A"}`
+                  : `模型分数 ${primaryScore?.toFixed(4) ?? "N/A"}`
+              }
+            </p>
             <p>
               入场日 {latest.entry_date}，出场日 {latest.exit_date}。如同日重跑，网站只保留这一交易日的官方结果。
             </p>
+            {
+              validation ? (
+                execution?.allTop10Blocked ? (
+                  <p>模型 Top1 为 <StockLink code={execution?.modelCode} />，但 Top10 全部开盘涨停，因此当天不成交。</p>
+                ) : execution?.fallbackApplied ? (
+                  <p>模型 Top1 <StockLink code={execution?.modelCode} /> 开盘涨停，实际顺延至 Rank {execution?.executedRank} 的 <StockLink code={primaryCode} />。</p>
+                ) : (
+                  <p>验证完成后，该页默认展示实际执行标的；本日与模型 Top1 一致。</p>
+                )
+              ) : (
+                <p>当前还是预测态，主展示为模型 Top1。验证完成后会自动切到实际执行结果。</p>
+              )
+            }
             <p>
               <a href={predictionDetailPath(latest.as_of_date)}>查看完整候选与验证详情</a>
             </p>
@@ -56,7 +82,7 @@ function toneClass(value) {
                 <p class={`metric-value ${toneClass(summary.hit === null ? null : summary.hit ? 1 : -1)}`}>
                   {summary.hit === null ? "待验证" : summary.hit ? "是" : "否"}
                 </p>
-                <p class="metric-note">是否获得正收益</p>
+                <p class="metric-note">按实际执行收益判断</p>
               </div>
               <div>
                 <span class="muted-label">Alpha</span>
@@ -64,11 +90,16 @@ function toneClass(value) {
                 <p class="metric-note">相对全市场均值</p>
               </div>
               <div>
-                <span class="muted-label">选中收益</span>
+                <span class="muted-label">策略收益</span>
                 <p class={`metric-value ${toneClass(summary.selected_return)}`}>
                   {formatSignedPercent(summary.selected_return)}
                 </p>
-                <p class="metric-note">按 entry/exit 回填</p>
+                <p class="metric-note">已含开盘涨停顺延规则</p>
+              </div>
+              <div>
+                <span class="muted-label">执行排名</span>
+                <p class="metric-value tone-neutral">{validation ? (execution?.executedRank ?? "无") : "待"}</p>
+                <p class="metric-note">Top10 内第一个可交易候选</p>
               </div>
             </div>
             {
@@ -91,27 +122,46 @@ function toneClass(value) {
       )
     }
 
-    <section class="card">
-      <h2>最近六次预测</h2>
+    <section class="section-block">
+      <div class="section-heading">
+        <div>
+          <span class="muted-label">Recent Tape</span>
+          <h2>最近六次预测</h2>
+        </div>
+        <p>默认显示实际执行结果；若顺延成交，会保留模型 Top1 对照。</p>
+      </div>
       {
         recentHistory.length ? (
           <div class="history-grid">
-            {recentHistory.map((item) => (
-              <article class="card history-card">
-                <div class="history-meta">
-                  <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
-                  <StatusPill status={item.status} />
-                </div>
-                <h3>
-                  <StockLink code={item.selected_code} />
-                </h3>
-                <p class={`metric-value ${toneClass(item.alpha)}`}>{formatSignedPercent(item.alpha)}</p>
-                <p class="metric-note">Alpha / 选中收益 {formatSignedPercent(item.selected_return)}</p>
-                <p class="history-actions">
-                  <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
-                </p>
-              </article>
-            ))}
+            {recentHistory.map((item) => {
+              const recentExecution = executionSummary(item);
+              const recentCode = displayPrimaryCode(item);
+              return (
+                <article class="card history-card">
+                  <div class="history-meta">
+                    <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
+                    <StatusPill status={item.status} />
+                  </div>
+                  <h3>
+                    <StockLink code={recentCode} />
+                  </h3>
+                  <p class={`metric-value ${toneClass(item.selected_return)}`}>{formatSignedPercent(item.selected_return)}</p>
+                  <p class="metric-note">Alpha {formatSignedPercent(item.alpha)}</p>
+                  {
+                    recentExecution.allTop10Blocked ? (
+                      <p class="execution-note">Top10 全封板，收益按 0 记。</p>
+                    ) : recentExecution.fallbackApplied ? (
+                      <p class="execution-note">模型 Top1 <StockLink code={item.selected_code} /> 顺延至 Rank {recentExecution.executedRank}。</p>
+                    ) : (
+                      <p class="execution-note">模型 Top1 直接成交。</p>
+                    )
+                  }
+                  <p class="history-actions">
+                    <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
+                  </p>
+                </article>
+              );
+            })}
           </div>
         ) : (
           <p>历史列表为空。</p>

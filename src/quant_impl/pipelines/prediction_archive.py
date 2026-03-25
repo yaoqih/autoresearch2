@@ -88,6 +88,7 @@ def canonical_prediction_payload(
 
 def prediction_index_record(payload: dict[str, Any]) -> dict[str, Any]:
     summary = payload.get("summary") or {}
+    validation = payload.get("validation") or {}
     return {
         "as_of_date": payload["as_of_date"],
         "archive_id": payload.get("archive_id"),
@@ -100,6 +101,10 @@ def prediction_index_record(payload: dict[str, Any]) -> dict[str, Any]:
         "hit": summary.get("hit"),
         "alpha": summary.get("alpha"),
         "selected_return": summary.get("selected_return"),
+        "executed_code": validation.get("executed_code"),
+        "executed_rank": validation.get("executed_rank"),
+        "fallback_applied": validation.get("fallback_applied"),
+        "all_top10_blocked": validation.get("all_top10_blocked"),
         "updated_at": payload.get("updated_at"),
     }
 
@@ -176,6 +181,7 @@ def update_legacy_run_archive(
     *,
     status: str,
     validation: dict[str, Any] | None,
+    top_candidates: list[dict[str, Any]] | None = None,
 ) -> None:
     if not archive_id:
         return
@@ -186,4 +192,6 @@ def update_legacy_run_archive(
     payload["status"] = status
     if validation is not None:
         payload["validation"] = validation
+    if top_candidates is not None:
+        payload["top_candidates"] = top_candidates
     write_json(path, payload)

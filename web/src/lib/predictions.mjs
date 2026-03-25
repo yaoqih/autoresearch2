@@ -67,6 +67,38 @@ export function predictionDetailPath(date) {
   return `/predictions/${date}`;
 }
 
+export function displayPrimaryCode(item) {
+  if (!item || typeof item !== "object") {
+    return "";
+  }
+  const executedCode = item.validation?.executed_code ?? item.executed_code;
+  if (executedCode) {
+    return String(executedCode);
+  }
+  const selectedCode = item.selected?.code ?? item.selected_code;
+  return selectedCode ? String(selectedCode) : "";
+}
+
+export function executionSummary(item) {
+  if (!item || typeof item !== "object") {
+    return {
+      modelCode: null,
+      executedCode: null,
+      executedRank: null,
+      fallbackApplied: false,
+      allTop10Blocked: false,
+    };
+  }
+  const validation = item.validation ?? item;
+  return {
+    modelCode: item.selected?.code ?? item.selected_code ?? null,
+    executedCode: validation.executed_code ?? item.executed_code ?? null,
+    executedRank: validation.executed_rank ?? item.executed_rank ?? null,
+    fallbackApplied: Boolean(validation.fallback_applied ?? item.fallback_applied),
+    allTop10Blocked: Boolean(validation.all_top10_blocked ?? item.all_top10_blocked),
+  };
+}
+
 export function displayStockCode(code) {
   if (!code) {
     return "";
@@ -110,4 +142,36 @@ export function formatSignedPercent(value) {
 
 export function statusLabel(status) {
   return status === "validated" ? "已验证" : "待验证";
+}
+
+export function buildDailyReturnSeries(index) {
+  if (!Array.isArray(index)) {
+    return [];
+  }
+  return index
+    .filter((item) => item?.selected_return !== null && item?.selected_return !== undefined)
+    .filter((item) => Number.isFinite(Number(item.selected_return)))
+    .map((item) => ({
+      date: String(item.as_of_date),
+      value: Number(item.selected_return),
+    }))
+    .sort((left, right) => left.date.localeCompare(right.date));
+}
+
+export function buildNavSeries(index) {
+  const dailySeries = buildDailyReturnSeries(index);
+  let nav = 1;
+  return dailySeries.map((item, indexValue) => {
+    if (indexValue === 0) {
+      return {
+        date: item.date,
+        value: nav,
+      };
+    }
+    nav *= 1 + item.value;
+    return {
+      date: item.date,
+      value: nav,
+    };
+  });
 }

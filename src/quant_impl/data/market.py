@@ -35,6 +35,8 @@ MERGED_COLUMNS = ("code", *BASE_COLUMNS)
 NUMERIC_COLUMNS = tuple(column for column in BASE_COLUMNS if column != "date")
 TARGET_NAME = "open_t_plus_2_vs_open_t_plus_1"
 PRICE_TOL = 0.011
+LIMIT_PCT_TOL = 0.002
+OPEN_LIMIT_SHAPE_SLACK_RATIO = 0.11
 
 
 @dataclass(frozen=True)
@@ -326,23 +328,32 @@ def _build_single_stock_feature_frame(
         high_values = high_price.to_numpy(dtype=np.float64)
         low_values = low_price.to_numpy(dtype=np.float64)
         close_values = close_price.to_numpy(dtype=np.float64)
+        pct_chg_values = frame["pct_chg"].to_numpy(dtype=np.float64) / 100.0
         for row_index in np.flatnonzero(valid_mask.to_numpy(dtype=bool)):
             trade_index = row_index + data_cfg.entry_offset_days
             if trade_index >= len(frame):
                 continue
             trade_date = day_strings[trade_index]
             prev_close = float(close_values[trade_index - 1])
-            upper_price = round_half_up(prev_close * (1.0 + limit_pct_for_date(code, trade_date)))
             open_at_entry = float(open_values[trade_index])
             high_at_entry = float(high_values[trade_index])
             low_at_entry = float(low_values[trade_index])
             close_at_entry = float(close_values[trade_index])
-            is_open_limit = open_at_entry >= upper_price - PRICE_TOL
+            limit_pct = limit_pct_for_date(code, trade_date)
+            open_gap = open_at_entry / prev_close - 1.0 if prev_close > 0 else float("-inf")
+            close_pct_chg = float(pct_chg_values[trade_index])
+            is_open_limit = open_gap >= limit_pct - LIMIT_PCT_TOL
+            if not is_open_limit:
+                shape_threshold = limit_pct * (1.0 - OPEN_LIMIT_SHAPE_SLACK_RATIO)
+                is_open_limit = (
+                    abs(high_at_entry - open_at_entry) <= PRICE_TOL
+                    and close_pct_chg >= shape_threshold
+                )
             is_one_word = (
                 is_open_limit
-                and abs(high_at_entry - upper_price) <= PRICE_TOL
-                and abs(low_at_entry - upper_price) <= PRICE_TOL
-                and abs(close_at_entry - upper_price) <= PRICE_TOL
+                and abs(high_at_entry - open_at_entry) <= PRICE_TOL
+                and abs(low_at_entry - open_at_entry) <= PRICE_TOL
+                and abs(close_at_entry - open_at_entry) <= PRICE_TOL
             )
             open_limit_day1[row_index] = 1 if is_open_limit else 0
             one_word_day1[row_index] = 1 if is_one_word else 0

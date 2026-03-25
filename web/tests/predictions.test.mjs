@@ -5,7 +5,10 @@ import path from "node:path";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 
 import {
+  buildDailyReturnSeries,
+  buildNavSeries,
   buildTonghuashunUrl,
+  displayPrimaryCode,
   displayStockCode,
   loadLatestPrediction,
   loadPredictionDetail,
@@ -122,4 +125,48 @@ test("builds Tonghuashun links from exchange-prefixed stock codes", () => {
   assert.equal(buildTonghuashunUrl("SH600758"), "https://stockpage.10jqka.com.cn/600758/");
   assert.equal(displayStockCode("SZ301363"), "301363");
   assert.equal(displayStockCode("SH600758"), "600758");
+});
+
+test("prefers executed code and builds chronological performance series", () => {
+  const history = [
+    {
+      as_of_date: "2026-03-24",
+      status: "validated",
+      selected_return: 0.02,
+      selected_code: "SZ000001",
+      executed_code: "SZ000002",
+    },
+    {
+      as_of_date: "2026-03-21",
+      status: "validated",
+      selected_return: -0.01,
+      selected_code: "SZ000003",
+    },
+    {
+      as_of_date: "2026-03-25",
+      status: "pending",
+      selected_return: null,
+      selected_code: "SZ000004",
+    },
+  ];
+
+  const dailySeries = buildDailyReturnSeries(history);
+  const navSeries = buildNavSeries(history);
+
+  assert.equal(displayPrimaryCode(history[0]), "SZ000002");
+  assert.equal(displayPrimaryCode(history[1]), "SZ000003");
+  assert.deepEqual(
+    dailySeries.map((item) => [item.date, item.value]),
+    [
+      ["2026-03-21", -0.01],
+      ["2026-03-24", 0.02],
+    ],
+  );
+  assert.deepEqual(
+    navSeries.map((item) => [item.date, item.value]),
+    [
+      ["2026-03-21", 1],
+      ["2026-03-24", 1.02],
+    ],
+  );
 });

@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from unittest.mock import patch
 
-from quant_impl.data.market import load_market_bundle, realized_day_lookup
+from quant_impl.data.market import load_market_bundle, realized_day_detail_lookup, realized_day_lookup
 from quant_impl.pipelines.predict_history import predict_history_pipeline
 from quant_impl.pipelines.predict import predict_pipeline
 from quant_impl.pipelines.train import train_pipeline
@@ -97,8 +97,19 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertIn("selected_ideal_return", validated_daily["validation"])
             self.assertIn("open_limit_day1", validated_daily["validation"])
             self.assertIn("tradeable", validated_daily["validation"])
+            self.assertIn("executed_code", validated_daily["validation"])
+            self.assertIn("executed_rank", validated_daily["validation"])
+            self.assertIn("schema_version", validated_daily["validation"])
+            self.assertIn("validation", validated_daily["top_candidates"][0])
+            self.assertIn("strict_open_return", validated_daily["top_candidates"][0]["validation"])
+            self.assertIn("tradeable", validated_daily["top_candidates"][0]["validation"])
+            self.assertIn("executed", validated_daily["top_candidates"][0]["validation"])
             self.assertEqual(validated_index[0]["status"], "validated")
             self.assertEqual(validated_index[0]["alpha"], validated_daily["validation"]["alpha"])
+            self.assertIn("executed_code", validated_index[0])
+            self.assertIn("executed_rank", validated_index[0])
+            self.assertIn("executed_code", history.columns)
+            self.assertIn("executed_rank", history.columns)
             self.assertEqual(len(history), 1)
 
             second_validation = validate_pipeline(config)
@@ -185,6 +196,68 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertEqual(first_daily["status"], "validated")
             self.assertEqual(second_daily["status"], "validated")
             self.assertEqual(len(history), 2)
+
+    def test_validate_pipeline_falls_back_to_next_tradeable_top_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.inference.archive_top_n = 10
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            as_of_date = bundle["dates"][-5]
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+            realized_map = realized_day_detail_lookup(bundle, as_of_date)
+            self.assertIsNotNone(realized_map)
+            top_candidates = prediction["top_candidates"]
+            top1 = top_candidates[0]["code"]
+            top2 = top_candidates[1]["code"]
+            modified_map = {code: dict(values) for code, values in realized_map.items()}
+            modified_map[top1]["open_limit_day1"] = True
+            modified_map[top1]["strict_open_return"] = 0.0
+            modified_map[top2]["open_limit_day1"] = False
+            modified_map[top2]["strict_open_return"] = 0.03125
+            modified_map[top2]["ideal_return"] = 0.03125
+
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validation = validate_pipeline(config)
+
+            validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+            self.assertEqual(validation["validated"], 1)
+            self.assertEqual(validated_daily["validation"]["executed_code"], top2)
+            self.assertEqual(validated_daily["validation"]["executed_rank"], 2)
+            self.assertEqual(validated_daily["validation"]["fallback_applied"], 1)
+            self.assertAlmostEqual(validated_daily["validation"]["selected_return"], 0.03125, places=8)
+            self.assertFalse(validated_daily["top_candidates"][0]["validation"]["executed"])
+            self.assertTrue(validated_daily["top_candidates"][1]["validation"]["executed"])
+
+    def test_validate_pipeline_sets_zero_return_when_top10_all_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.inference.archive_top_n = 10
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            as_of_date = bundle["dates"][-5]
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+            realized_map = realized_day_detail_lookup(bundle, as_of_date)
+            self.assertIsNotNone(realized_map)
+            modified_map = {code: dict(values) for code, values in realized_map.items()}
+
+            for item in prediction["top_candidates"]:
+                modified_map[item["code"]]["open_limit_day1"] = True
+                modified_map[item["code"]]["strict_open_return"] = 0.0
+
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validation = validate_pipeline(config)
+
+            validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+            self.assertEqual(validation["validated"], 1)
+            self.assertEqual(validated_daily["validation"]["all_top10_blocked"], 1)
+            self.assertEqual(validated_daily["validation"]["selected_return"], 0.0)
+            self.assertIsNone(validated_daily["validation"]["executed_code"])
+            self.assertEqual(validated_daily["summary"]["selected_return"], 0.0)
 
     def test_predict_pipeline_uses_local_market_dates_for_recent_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

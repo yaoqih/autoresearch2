@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pandas as pd
 
@@ -17,6 +18,81 @@ from quant_impl.utils.io import write_json
 
 
 LOGGER = logging.getLogger(__name__)
+VALIDATION_SCHEMA_VERSION = 2
+
+
+def _candidate_validation_payload(
+    detail: dict[str, float | bool] | None,
+    *,
+    executed: bool,
+) -> dict[str, Any] | None:
+    if detail is None:
+        return None
+    open_limit_day1 = bool(detail["open_limit_day1"])
+    one_word_day1 = bool(detail["one_word_day1"])
+    return {
+        "ideal_return": float(detail["ideal_return"]),
+        "strict_open_return": float(detail["strict_open_return"]),
+        "strict_one_word_return": float(detail["strict_one_word_return"]),
+        "open_limit_day1": int(open_limit_day1),
+        "one_word_day1": int(one_word_day1),
+        "tradeable": int(not open_limit_day1),
+        "executed": bool(executed),
+    }
+
+
+def _enrich_top_candidates(
+    top_candidates: list[dict[str, Any]],
+    realized_map: dict[str, dict[str, float | bool]],
+    *,
+    max_fallback_rank: int = 10,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    executed_index: int | None = None
+
+    for index, candidate in enumerate(top_candidates):
+        code = str(candidate["code"])
+        detail = realized_map.get(code)
+        tradeable = bool(detail is not None and not bool(detail["open_limit_day1"]))
+        if executed_index is None and index < max_fallback_rank and tradeable:
+            executed_index = index
+
+    for index, candidate in enumerate(top_candidates):
+        detail = realized_map.get(str(candidate["code"]))
+        enriched.append(
+            {
+                **candidate,
+                "validation": _candidate_validation_payload(detail, executed=index == executed_index),
+            }
+        )
+
+    executed_candidate = enriched[executed_index] if executed_index is not None else None
+    executed_validation = executed_candidate["validation"] if executed_candidate is not None else None
+    fallback_window = min(max_fallback_rank, len(top_candidates))
+    return enriched, {
+        "executed_code": executed_candidate["code"] if executed_candidate is not None else None,
+        "executed_rank": int(executed_candidate["rank"]) if executed_candidate is not None else None,
+        "executed_score": float(executed_candidate["score"]) if executed_candidate is not None else None,
+        "executed_return": (
+            float(executed_validation["strict_open_return"])
+            if executed_validation is not None
+            else 0.0
+        ),
+        "executed_ideal_return": (
+            float(executed_validation["ideal_return"])
+            if executed_validation is not None
+            else 0.0
+        ),
+        "fallback_applied": int(executed_index is not None and executed_index > 0),
+        "all_top10_blocked": int(executed_index is None and fallback_window > 0),
+    }
+
+
+def _has_candidate_level_validation(payload: dict[str, Any]) -> bool:
+    top_candidates = payload.get("top_candidates") or []
+    if not top_candidates:
+        return True
+    return all(isinstance(candidate.get("validation"), dict) for candidate in top_candidates)
 
 
 def validate_pipeline(config: AppConfig) -> dict[str, object]:
@@ -61,8 +137,10 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
 
         ideal_values = [float(item["ideal_return"]) for item in realized_map.values()]
         strict_open_values = [float(item["strict_open_return"]) for item in realized_map.values()]
+        top_candidates = list(payload.get("top_candidates") or [])
+        enriched_top_candidates, executed = _enrich_top_candidates(top_candidates, realized_map)
         selected = realized_map[selected_code]
-        selected_return = float(selected["strict_open_return"])
+        selected_return = float(executed["executed_return"])
         universe_return = float(sum(ideal_values) / len(ideal_values))
         oracle_return = float(max(strict_open_values))
         alpha = selected_return - universe_return
@@ -75,7 +153,7 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             "selected_code": selected_code,
             "selected_score": payload["selected_score"],
             "selected_return": selected_return,
-            "selected_ideal_return": float(selected["ideal_return"]),
+            "selected_ideal_return": float(executed["executed_ideal_return"]),
             "universe_return": universe_return,
             "oracle_return": oracle_return,
             "oracle_ideal_return": float(max(ideal_values)),
@@ -84,16 +162,36 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             "open_limit_day1": int(bool(selected["open_limit_day1"])),
             "one_word_day1": int(bool(selected["one_word_day1"])),
             "tradeable": int(not bool(selected["open_limit_day1"])),
+            "executed_code": executed["executed_code"],
+            "executed_rank": executed["executed_rank"],
+            "executed_score": executed["executed_score"],
+            "fallback_applied": int(executed["fallback_applied"]),
+            "all_top10_blocked": int(executed["all_top10_blocked"]),
+            "schema_version": VALIDATION_SCHEMA_VERSION,
         }
         history_rows_by_date[payload["as_of_date"]] = row
-        if payload.get("status") == "validated" and payload.get("validation") == row:
+        payload_validation = payload.get("validation") or {}
+        schema_matches = payload_validation.get("schema_version") == VALIDATION_SCHEMA_VERSION
+        if (
+            payload.get("status") == "validated"
+            and payload_validation == row
+            and schema_matches
+            and _has_candidate_level_validation(payload)
+        ):
             continue
 
         payload["status"] = "validated"
         payload["validation"] = row
+        payload["top_candidates"] = enriched_top_candidates
         canonical = canonical_prediction_payload(payload)
         write_json(config.prediction_daily_path(payload["as_of_date"]), canonical)
-        update_legacy_run_archive(config, payload.get("archive_id"), status="validated", validation=row)
+        update_legacy_run_archive(
+            config,
+            payload.get("archive_id"),
+            status="validated",
+            validation=row,
+            top_candidates=enriched_top_candidates,
+        )
         rows.append(row)
         validated += 1
 
