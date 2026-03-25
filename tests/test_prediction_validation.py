@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
 from pathlib import Path
-from unittest.mock import patch
-
 import pandas as pd
 import torch
+from unittest.mock import patch
 
 from quant_impl.data.market import load_market_bundle, realized_day_lookup
+from quant_impl.pipelines.predict_history import predict_history_pipeline
 from quant_impl.pipelines.predict import predict_pipeline
 from quant_impl.pipelines.train import train_pipeline
 from quant_impl.pipelines.validate import validate_pipeline
@@ -19,37 +18,24 @@ from tests.helpers import make_synthetic_market_parquet, make_test_config
 
 
 class PredictionValidationTest(unittest.TestCase):
-    def test_predict_pipeline_uses_training_contract_and_trading_calendar_for_dates(self) -> None:
+    def test_predict_pipeline_uses_training_contract_for_dates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             config = make_test_config(root)
             make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
             train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
             bundle = load_market_bundle(config)
-            as_of_date = date.fromisoformat(bundle["dates"][-5])
-
-            class StubCalendar:
-                _next = {
-                    as_of_date: date(2020, 4, 8),
-                    date(2020, 4, 8): date(2020, 4, 9),
-                    date(2020, 4, 9): date(2020, 4, 10),
-                    date(2020, 4, 10): date(2020, 4, 13),
-                    date(2020, 4, 13): date(2020, 4, 14),
-                    date(2020, 4, 14): date(2020, 4, 15),
-                }
-
-                def next_session(self, value: date) -> date:
-                    return self._next[value]
+            as_of_date = bundle["dates"][-5]
+            as_of_index = bundle["dates"].index(as_of_date)
 
             config.data.entry_offset_days = 4
             config.data.exit_offset_days = 6
             config.data.ret_windows = (5, 3, 2)
 
-            with patch("quant_impl.pipelines.predict.TradingCalendar", StubCalendar, create=True):
-                prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date.isoformat())
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
 
-            self.assertEqual(prediction["entry_date"], "2020-04-08")
-            self.assertEqual(prediction["exit_date"], "2020-04-09")
+            self.assertEqual(prediction["entry_date"], bundle["dates"][as_of_index + 1])
+            self.assertEqual(prediction["exit_date"], bundle["dates"][as_of_index + 2])
 
     def test_predict_pipeline_rejects_feature_contract_mismatch_in_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -169,6 +155,55 @@ class PredictionValidationTest(unittest.TestCase):
 
             self.assertEqual(validation["validated"], 1)
             self.assertAlmostEqual(daily_payload["validation"]["selected_return"], float(expected_return), places=8)
+
+    def test_predict_history_pipeline_backfills_validation_for_multiple_days(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            start_date = bundle["dates"][-6]
+            end_date = bundle["dates"][-5]
+
+            result = predict_history_pipeline(
+                config,
+                device="cpu",
+                start_date=start_date,
+                end_date=end_date,
+                validate=True,
+            )
+
+            self.assertEqual(result["predicted"], 2)
+            self.assertEqual(result["dates"], [start_date, end_date])
+            self.assertEqual(result["validation"]["validated"], 2)
+
+            first_daily = read_json(config.paths.predictions_dir / "daily" / f"{start_date}.json")
+            second_daily = read_json(config.paths.predictions_dir / "daily" / f"{end_date}.json")
+            history = pd.read_csv(config.validation_history_path)
+
+            self.assertEqual(first_daily["status"], "validated")
+            self.assertEqual(second_daily["status"], "validated")
+            self.assertEqual(len(history), 2)
+
+    def test_predict_pipeline_uses_local_market_dates_for_recent_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+
+            merged = pd.read_parquet(config.paths.merged_parquet, columns=["date"])
+            raw_dates = sorted(pd.to_datetime(merged["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d").unique())
+            as_of_date = raw_dates[-2]
+            expected_entry_date = raw_dates[-1]
+            expected_exit_date = (pd.Timestamp(expected_entry_date) + pd.offsets.BDay(1)).strftime("%Y-%m-%d")
+
+            with patch("quant_impl.pipelines.predict.TradingCalendar", side_effect=RuntimeError("network calendar disabled")):
+                prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+
+            self.assertEqual(prediction["entry_date"], expected_entry_date)
+            self.assertEqual(prediction["exit_date"], expected_exit_date)
 
 
 if __name__ == "__main__":

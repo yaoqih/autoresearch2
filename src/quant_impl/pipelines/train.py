@@ -17,6 +17,7 @@ from quant_impl.data.market import (
     feature_columns,
     load_market_bundle,
     make_day_batches,
+    resolve_bundle_date_window,
     simulate_sleeve_equity,
     summarize_period,
     transform_training_targets,
@@ -463,17 +464,25 @@ def train_pipeline(
     deploy_only: bool = False,
     force_prepare: bool = False,
     limit_stocks: int | None = None,
+    deployment_start_date: str | None = None,
+    deployment_end_date: str | None = None,
+    deployment_anchor_date: str | None = None,
+    deployment_lookback_years: int | None = None,
 ) -> dict[str, object]:
     runtime_config, max_folds = config_for_profile(config, profile)
     seed_everything(runtime_config.training.seed)
     LOGGER.info(
-        "Train pipeline start profile=%s deploy_only=%s device=%s force_prepare=%s limit_stocks=%s seed=%s",
+        "Train pipeline start profile=%s deploy_only=%s device=%s force_prepare=%s limit_stocks=%s seed=%s deployment_start_date=%s deployment_end_date=%s deployment_anchor_date=%s deployment_lookback_years=%s",
         profile,
         deploy_only,
         device,
         force_prepare,
         limit_stocks,
         runtime_config.training.seed,
+        deployment_start_date,
+        deployment_end_date,
+        deployment_anchor_date,
+        deployment_lookback_years,
     )
     LOGGER.info(
         "Champion spec member=%s temporal_mode=%s target_transform=%s train_target_abs_cap=%.4f",
@@ -560,13 +569,51 @@ def train_pipeline(
             summary["cv_holdout_selection_score"],
         )
 
-    if deploy_only:
+    custom_deployment_window = None
+    if (
+        deployment_start_date is not None
+        or deployment_end_date is not None
+        or deployment_anchor_date is not None
+        or deployment_lookback_years is not None
+    ):
+        custom_deployment_window = resolve_bundle_date_window(
+            bundle,
+            start_date=deployment_start_date,
+            end_date=deployment_end_date,
+            anchor_date=deployment_anchor_date,
+            lookback_years=deployment_lookback_years,
+        )
+
+    if custom_deployment_window is not None:
+        deployment_train_days = list(custom_deployment_window["day_indices"])
+        deployment_valid_indices = []
+        deployment_window = {
+            **custom_deployment_window,
+            "uses_validation": False,
+        }
+    elif deploy_only:
         deployment_valid_start = len(bundle["dates"])
         if runtime_config.data.rolling_train:
             deployment_train_start = max(0, len(bundle["dates"]) - runtime_config.data.train_days)
         else:
             deployment_train_start = 0
         deployment_valid_indices = []
+        deployment_train_days = list(range(deployment_train_start, deployment_valid_start))
+        deployment_window = {
+            "mode": "default_tail_no_valid",
+            "requested_start_date": bundle["dates"][deployment_train_start] if deployment_train_days else None,
+            "requested_end_date": bundle["dates"][deployment_valid_start - 1] if deployment_train_days else None,
+            "anchor_date": bundle["dates"][-1] if bundle["dates"] else None,
+            "lookback_years": None,
+            "lookback_months": None,
+            "resolved_start_index": deployment_train_start,
+            "resolved_end_index_exclusive": deployment_valid_start,
+            "resolved_start_date": bundle["dates"][deployment_train_start] if deployment_train_days else None,
+            "resolved_end_date": bundle["dates"][deployment_valid_start - 1] if deployment_train_days else None,
+            "day_indices": deployment_train_days,
+            "dates": bundle["dates"][deployment_train_start:deployment_valid_start],
+            "uses_validation": False,
+        }
     else:
         deployment_valid_start = max(1, len(bundle["dates"]) - runtime_config.data.valid_days)
         if runtime_config.data.rolling_train:
@@ -574,7 +621,24 @@ def train_pipeline(
         else:
             deployment_train_start = 0
         deployment_valid_indices = list(range(deployment_valid_start, len(bundle["dates"])))
-    deployment_train_days = list(range(deployment_train_start, deployment_valid_start))
+        deployment_train_days = list(range(deployment_train_start, deployment_valid_start))
+        deployment_window = {
+            "mode": "default_tail_with_valid",
+            "requested_start_date": bundle["dates"][deployment_train_start] if deployment_train_days else None,
+            "requested_end_date": bundle["dates"][len(bundle["dates"]) - 1] if bundle["dates"] else None,
+            "anchor_date": bundle["dates"][-1] if bundle["dates"] else None,
+            "lookback_years": None,
+            "lookback_months": None,
+            "resolved_start_index": deployment_train_start,
+            "resolved_end_index_exclusive": deployment_valid_start,
+            "resolved_start_date": bundle["dates"][deployment_train_start] if deployment_train_days else None,
+            "resolved_end_date": bundle["dates"][deployment_valid_start - 1] if deployment_train_days else None,
+            "day_indices": deployment_train_days,
+            "dates": bundle["dates"][deployment_train_start:deployment_valid_start],
+            "valid_start_date": bundle["dates"][deployment_valid_start] if deployment_valid_indices else None,
+            "valid_end_date": bundle["dates"][-1] if deployment_valid_indices else None,
+            "uses_validation": True,
+        }
     deployment_seed = runtime_config.training.seed + len(splits)
     seed_everything(deployment_seed)
     deployment_model, deployment_fit = fit_one_window(
@@ -587,7 +651,7 @@ def train_pipeline(
         window_name="deployment",
         epochs_override=runtime_config.training.deployment_epochs,
         enable_early_stopping=False,
-        select_checkpoint_on_valid=not deploy_only,
+        select_checkpoint_on_valid=bool(deployment_valid_indices),
     )
     deployment_training_config = asdict(runtime_config.training)
     deployment_training_config["epochs"] = runtime_config.training.deployment_epochs
@@ -610,6 +674,7 @@ def train_pipeline(
         "data_config": asdict(runtime_config.data),
         "training_config": asdict(runtime_config.training),
         "deployment_training_config": deployment_training_config,
+        "deployment_window": deployment_window,
         "state_dict": deployment_model.state_dict(),
         "summary": summary,
         "deployment_fit": deployment_fit,
@@ -624,6 +689,7 @@ def train_pipeline(
         "summary": summary,
         "folds": fold_summaries,
         "deployment_fit": deployment_fit,
+        "deployment_window": deployment_window,
         "deployment_training_config": deployment_training_config,
         "champion_spec": artifact["champion_spec"],
     }

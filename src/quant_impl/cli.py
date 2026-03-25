@@ -6,6 +6,7 @@ import logging
 
 from quant_impl.data.market import build_market_cache, merge_daily_parquets
 from quant_impl.pipelines.daily import daily_pipeline, run_download_step
+from quant_impl.pipelines.predict_history import predict_history_pipeline
 from quant_impl.pipelines.predict import predict_pipeline
 from quant_impl.pipelines.train import train_pipeline
 from quant_impl.pipelines.validate import validate_pipeline
@@ -49,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--deploy-only", action="store_true")
     train.add_argument("--force-prepare", action="store_true")
     train.add_argument("--limit-stocks", type=int, default=None)
+    train.add_argument("--deployment-start-date", default=None)
+    train.add_argument("--deployment-end-date", default=None)
+    train.add_argument("--deployment-anchor-date", default=None)
+    train.add_argument("--deployment-lookback-years", type=int, default=None)
     train.set_defaults(command="train")
 
     predict = subparsers.add_parser("predict", help="Score the latest available market date")
@@ -57,6 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--as-of-date", default=None)
     predict.add_argument("--limit-stocks", type=int, default=None)
     predict.set_defaults(command="predict")
+
+    predict_history = subparsers.add_parser("predict-history", help="Score a historical date range")
+    add_logging_args(predict_history)
+    predict_history.add_argument("--device", default=None)
+    predict_history.add_argument("--start-date", default=None)
+    predict_history.add_argument("--end-date", default=None)
+    predict_history.add_argument("--anchor-date", default=None)
+    predict_history.add_argument("--lookback-months", type=int, default=None)
+    predict_history.add_argument("--validate", action="store_true")
+    predict_history.add_argument("--limit-stocks", type=int, default=None)
+    predict_history.set_defaults(command="predict-history")
 
     validate = subparsers.add_parser("validate", help="Validate historical prediction archives")
     add_logging_args(validate)
@@ -104,12 +120,27 @@ def main() -> None:
             deploy_only=args.deploy_only,
             force_prepare=args.force_prepare,
             limit_stocks=args.limit_stocks,
+            deployment_start_date=args.deployment_start_date,
+            deployment_end_date=args.deployment_end_date,
+            deployment_anchor_date=args.deployment_anchor_date,
+            deployment_lookback_years=args.deployment_lookback_years,
         )
     elif args.command == "predict":
         result = predict_pipeline(
             config,
             device=args.device,
             as_of_date=args.as_of_date,
+            limit_stocks=args.limit_stocks,
+        )
+    elif args.command == "predict-history":
+        result = predict_history_pipeline(
+            config,
+            device=args.device,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            anchor_date=args.anchor_date,
+            lookback_months=args.lookback_months,
+            validate=args.validate,
             limit_stocks=args.limit_stocks,
         )
     elif args.command == "validate":

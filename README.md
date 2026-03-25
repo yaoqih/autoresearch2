@@ -219,6 +219,26 @@ PYTHONPATH=src python -m quant_impl.cli prepare --force
 PYTHONPATH=src python -m quant_impl.cli train  --device mps --deploy-only
 ```
 
+固定 `2021-2025` 窗口训练 deployment 模型：
+
+```bash
+PYTHONPATH=src python -m quant_impl.cli train \
+  --device cuda:3 \
+  --deploy-only \
+  --deployment-start-date 2021-01-01 \
+  --deployment-end-date 2025-12-31
+```
+
+按当前日期往前回看 `5` 年连续训练 deployment 模型：
+
+```bash
+PYTHONPATH=src python -m quant_impl.cli train \
+  --device cuda:3 \
+  --deploy-only \
+  --deployment-anchor-date 2026-03-26 \
+  --deployment-lookback-years 5
+```
+
 推荐：
 
 - 快速试跑用 `screen`
@@ -251,6 +271,16 @@ PYTHONPATH=src python -m quant_impl.cli predict --device cuda:3
 
 ```bash
 PYTHONPATH=src python -m quant_impl.cli validate
+```
+
+如果要批量推最近 `3` 个月并在结束后自动回填真实结果：
+
+```bash
+PYTHONPATH=src python -m quant_impl.cli predict-history \
+  --device cuda:3 \
+  --anchor-date 2026-03-26 \
+  --lookback-months 3 \
+  --validate
 ```
 
 输出：
@@ -491,6 +521,12 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
   - 训练前强制重建 bundle
 - `--limit-stocks`
   - 只训练部分股票，用于调试
+- `--deployment-start-date` / `--deployment-end-date`
+  - 显式指定 deployment 模型连续训练窗
+  - 常用于固定区间训练，如 `2021-01-01..2025-12-31`
+- `--deployment-anchor-date` / `--deployment-lookback-years`
+  - 从锚点日期向前回看 N 个日历年，生成 deployment 连续训练窗
+  - 常用于“按当前日期往前 5 年训练”
 
 训练输出：
 
@@ -531,6 +567,33 @@ PYTHONPATH=src python -m quant_impl.cli predict --device cuda:3 --as-of-date 202
 - 网站列表：`artifacts/predictions/index.json`
 - 网站最新：`artifacts/predictions/latest.json`
 - 日志文件：`artifacts/logs/predict.log`
+
+### `predict-history`
+
+```bash
+PYTHONPATH=src python -m quant_impl.cli predict-history --anchor-date 2026-03-26 --lookback-months 3 --validate
+```
+
+参数：
+
+- `--start-date` / `--end-date`
+  - 显式指定历史预测区间
+- `--anchor-date` / `--lookback-months`
+  - 从锚点日期向前回看 N 个月，自动取范围内可预测交易日
+- `--validate`
+  - 批量预测后立刻运行 `validate`，把真实结果回填到日期归档和 `history.csv`
+- `--device`
+  - 推理设备
+- `--limit-stocks`
+  - 只对部分股票打分
+
+输出：
+
+- 为范围内每个交易日生成 `artifacts/predictions/<archive_id>/prediction.json`
+- 更新 `artifacts/predictions/daily/YYYY-MM-DD.json`
+- 如开启 `--validate`，同步更新 `artifacts/predictions/index.json`
+- 如开启 `--validate`，同步更新 `artifacts/predictions/latest.json`
+- 如开启 `--validate`，同步更新 `artifacts/validation/history.csv`
 
 ### `validate`
 

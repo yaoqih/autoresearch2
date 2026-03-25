@@ -87,6 +87,57 @@ class TrainPipelineTest(unittest.TestCase):
             self.assertEqual(result["deployment_training_config"]["epochs"], 3)
             self.assertEqual(artifact["deployment_training_config"]["epochs"], 3)
 
+    def test_train_pipeline_uses_explicit_deployment_date_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            bundle = load_market_bundle(config, force=True)
+            start_date = bundle["dates"][10]
+            end_date = bundle["dates"][25]
+
+            result = train_pipeline(
+                config,
+                device="cpu",
+                profile="full",
+                force_prepare=True,
+                deploy_only=True,
+                deployment_start_date=start_date,
+                deployment_end_date=end_date,
+            )
+
+            self.assertEqual(result["deployment_fit"]["train_start_date"], start_date)
+            self.assertEqual(result["deployment_fit"]["train_end_date"], end_date)
+            self.assertEqual(result["deployment_fit"]["valid_days"], 0)
+            self.assertEqual(result["deployment_window"]["mode"], "explicit")
+            self.assertEqual(result["deployment_window"]["resolved_start_date"], start_date)
+            self.assertEqual(result["deployment_window"]["resolved_end_date"], end_date)
+
+    def test_train_pipeline_uses_anchor_date_lookback_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            bundle = load_market_bundle(config, force=True)
+            anchor_date = bundle["dates"][-1]
+
+            result = train_pipeline(
+                config,
+                device="cpu",
+                profile="full",
+                force_prepare=True,
+                deploy_only=True,
+                deployment_anchor_date=anchor_date,
+                deployment_lookback_years=1,
+            )
+
+            self.assertEqual(result["deployment_window"]["mode"], "lookback_years")
+            self.assertEqual(result["deployment_window"]["anchor_date"], anchor_date)
+            self.assertEqual(result["deployment_window"]["lookback_years"], 1)
+            self.assertEqual(result["deployment_fit"]["train_start_date"], bundle["dates"][0])
+            self.assertEqual(result["deployment_fit"]["train_end_date"], anchor_date)
+            self.assertEqual(result["deployment_fit"]["valid_days"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1049,6 +1049,91 @@ def latest_market_date(config: AppConfig) -> str:
     return latest_text
 
 
+def available_market_dates(config: AppConfig) -> list[str]:
+    parquet_file = pq.ParquetFile(resolve_merged_path(config))
+    values: set[str] = set()
+    for row_group in range(parquet_file.num_row_groups):
+        frame = parquet_file.read_row_group(row_group, columns=["date"]).to_pandas()
+        if frame.empty:
+            continue
+        dates = pd.to_datetime(frame["date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d")
+        values.update(dates.tolist())
+    if not values:
+        raise RuntimeError("Could not determine available market dates")
+    resolved = sorted(values)
+    LOGGER.info("Resolved available market dates count=%s start=%s end=%s", len(resolved), resolved[0], resolved[-1])
+    return resolved
+
+
+def resolve_bundle_date_window(
+    bundle,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    anchor_date: str | None = None,
+    lookback_years: int | None = None,
+    lookback_months: int | None = None,
+) -> dict[str, object]:
+    def _normalized_timestamp(value: object) -> pd.Timestamp:
+        return pd.Timestamp(str(value)).normalize()
+
+    dates = list(bundle["dates"])
+    if not dates:
+        raise RuntimeError("Bundle does not contain any dates")
+
+    date_index = pd.DatetimeIndex(pd.to_datetime(dates)).normalize()
+    uses_explicit = start_date is not None or end_date is not None
+    uses_year_lookback = lookback_years is not None
+    uses_month_lookback = lookback_months is not None
+
+    if uses_explicit:
+        if anchor_date is not None or uses_year_lookback or uses_month_lookback:
+            raise ValueError("Use either explicit start/end dates or anchor_date with lookback")
+        requested_start = _normalized_timestamp(start_date) if start_date is not None else date_index[0]
+        requested_end = _normalized_timestamp(end_date) if end_date is not None else date_index[-1]
+        mode = "explicit"
+    else:
+        if anchor_date is None:
+            raise ValueError("anchor_date is required when using lookback windows")
+        if uses_year_lookback == uses_month_lookback:
+            raise ValueError("Provide exactly one of lookback_years or lookback_months")
+        anchor = _normalized_timestamp(anchor_date)
+        offset = (
+            pd.DateOffset(years=int(lookback_years))
+            if uses_year_lookback
+            else pd.DateOffset(months=int(lookback_months))
+        )
+        requested_start = (anchor - offset).normalize()
+        requested_end = anchor
+        mode = "lookback_years" if uses_year_lookback else "lookback_months"
+
+    if requested_end < requested_start:
+        raise ValueError("Date window end must be on or after start")
+
+    positions = np.flatnonzero((date_index >= requested_start) & (date_index <= requested_end))
+    if len(positions) == 0:
+        raise RuntimeError(
+            f"No bundle dates found in requested window {requested_start.strftime('%Y-%m-%d')}..{requested_end.strftime('%Y-%m-%d')}"
+        )
+
+    start_index = int(positions[0])
+    end_index_exclusive = int(positions[-1]) + 1
+    return {
+        "mode": mode,
+        "requested_start_date": requested_start.strftime("%Y-%m-%d"),
+        "requested_end_date": requested_end.strftime("%Y-%m-%d"),
+        "anchor_date": _normalized_timestamp(anchor_date).strftime("%Y-%m-%d") if anchor_date is not None else None,
+        "lookback_years": int(lookback_years) if lookback_years is not None else None,
+        "lookback_months": int(lookback_months) if lookback_months is not None else None,
+        "resolved_start_index": start_index,
+        "resolved_end_index_exclusive": end_index_exclusive,
+        "resolved_start_date": dates[start_index],
+        "resolved_end_date": dates[end_index_exclusive - 1],
+        "day_indices": list(range(start_index, end_index_exclusive)),
+        "dates": dates[start_index:end_index_exclusive],
+    }
+
+
 def build_scoring_snapshot(
     config: AppConfig,
     *,

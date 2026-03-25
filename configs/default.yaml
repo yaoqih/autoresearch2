@@ -278,7 +278,7 @@ training:
   epochs: 18
 
   # 最终 deployment 模型回训的 epoch 数。
-  deployment_epochs: 5
+  deployment_epochs: 4
 
   # 每个 batch 由多少个交易日组成。
   batch_days: 20
