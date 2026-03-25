@@ -4,7 +4,7 @@ import logging
 
 import pandas as pd
 
-from quant_impl.data.market import load_market_bundle, realized_day_lookup
+from quant_impl.data.market import load_market_bundle, realized_day_detail_lookup
 from quant_impl.pipelines.model_contract import contract_config_from_artifact, load_prediction_artifact
 from quant_impl.pipelines.prediction_archive import (
     canonical_prediction_payload,
@@ -53,16 +53,18 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             contract_config = contract_config_from_artifact(config, artifact)
             bundle = load_market_bundle(contract_config, force=False)
             bundle_cache[bundle_key] = bundle
-        realized_map = realized_day_lookup(bundle, payload["as_of_date"])
+        realized_map = realized_day_detail_lookup(bundle, payload["as_of_date"])
         selected_code = payload["selected_code"]
         if not realized_map or selected_code not in realized_map:
             pending += 1
             continue
 
-        values = list(realized_map.values())
-        selected_return = float(realized_map[selected_code])
-        universe_return = float(sum(values) / len(values))
-        oracle_return = float(max(values))
+        ideal_values = [float(item["ideal_return"]) for item in realized_map.values()]
+        strict_open_values = [float(item["strict_open_return"]) for item in realized_map.values()]
+        selected = realized_map[selected_code]
+        selected_return = float(selected["strict_open_return"])
+        universe_return = float(sum(ideal_values) / len(ideal_values))
+        oracle_return = float(max(strict_open_values))
         alpha = selected_return - universe_return
         row = {
             "archive_id": payload["archive_id"],
@@ -73,10 +75,15 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             "selected_code": selected_code,
             "selected_score": payload["selected_score"],
             "selected_return": selected_return,
+            "selected_ideal_return": float(selected["ideal_return"]),
             "universe_return": universe_return,
             "oracle_return": oracle_return,
+            "oracle_ideal_return": float(max(ideal_values)),
             "alpha": alpha,
             "hit": int(selected_return > 0),
+            "open_limit_day1": int(bool(selected["open_limit_day1"])),
+            "one_word_day1": int(bool(selected["one_word_day1"])),
+            "tradeable": int(not bool(selected["open_limit_day1"])),
         }
         history_rows_by_date[payload["as_of_date"]] = row
         if payload.get("status") == "validated" and payload.get("validation") == row:

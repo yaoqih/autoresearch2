@@ -101,7 +101,7 @@ class DownloadSettings:
 
 @dataclass
 class DataSettings:
-    cache_version: str = "champion_20260323_lc96_rank_center_full5y"
+    cache_version: str = "mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y"
     min_listed_days: int = 120
     min_daily_universe: int = 100
     target_clip: tuple[float, float] = (-0.25, 0.25)
@@ -155,7 +155,7 @@ class ModelSettings:
 class TrainingSettings:
     member_config: str = "lc96"
     temporal_mode: str = "full5y"
-    target_transform: str = "rank_center"
+    target_transform: str = "exec_fillable_rank_neg1"
     train_target_abs_cap: float = 0.10
     train_target_cap_applies_to_linear_head: bool = True
     seed: int = 42
@@ -189,7 +189,7 @@ class TrainingSettings:
 class InferenceSettings:
     top_k: int = 1
     archive_top_n: int = 10
-    prediction_name: str = "champion_20260323_lc96_rank_center_full5y"
+    prediction_name: str = "mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y"
 
 
 @dataclass

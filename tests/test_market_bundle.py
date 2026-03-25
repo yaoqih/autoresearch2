@@ -52,6 +52,10 @@ class MarketBundleTest(unittest.TestCase):
             splits = build_walk_forward_splits(bundle, config.data)
             self.assertGreater(bundle["features"].shape[0], 0)
             self.assertEqual(len(bundle["feature_names"]), len(bundle["feature_names"]))
+            self.assertIn("open_limit_day1", bundle)
+            self.assertIn("one_word_day1", bundle)
+            self.assertEqual(bundle["open_limit_day1"].shape[0], bundle["targets"].shape[0])
+            self.assertEqual(bundle["one_word_day1"].shape[0], bundle["targets"].shape[0])
             self.assertGreaterEqual(len(splits), 1)
 
 

@@ -1,12 +1,12 @@
 # quant-impl
 
-基于 `/project/autoresearch` 在 `2026-03-23` 确认的 champion handoff 方案落地的 A 股量化实施仓库。
+基于 `/project/autoresearch` 在 `2026-03-26` 确认的 execution-aware control handoff 方案落地的 A 股量化实施仓库。
 
 这个仓库不是研究 runner，而是面向实施和日常运行的量化工程版本。它把研究期已经确认的核心协议固定下来，并补齐了生产侧真正需要的几条链路：
 
 - 数据获取：主入口是 `PYTHONPATH=src python -m quant_impl.cli download`，底层复用 [`download_stock.py`](./download_stock.py)，默认直连保守运行；开启巨量后自动切到“单代理提取 + 并发复用”模式，并保留可续传。
 - 数据整理：将单票 parquet 合并为市场级 parquet，再构建训练和推理共用的 bundle。
-- 模型训练：walk-forward 评估固定为 `lc96 + rank_center + train-only abs(target)<=10% + full5y`，最终 deployment 模型回训最近一个 `5y train + 1y valid` 窗口，固定 `5` 个 epoch 且不做 early stop。
+- 模型训练：walk-forward 评估固定为 `lc96 + exec_fillable_rank_neg1 + strict executable eval + train-only abs(target)<=10% + full5y`，最终 deployment 模型回训最近一个 `5y train + 1y valid` 窗口，固定 `5` 个 epoch 且不做 early stop。
 - 每日任务：增量抓数、面板刷新、预测归档、历史预测回填验证。
 - 统一日志：下载、合并、prepare、train、predict、validate、daily 全部接入统一日志目录和命令级日志文件。
 
@@ -15,17 +15,21 @@
 这里固定的不是某一版参数，而是整套标签和评估口径：
 
 - 标签：`open[t+2] / open[t+1] - 1`
-- 训练目标：按当日截面收益排序后映射成 `rank_center`，范围 `[-1, 1]`
+- 训练目标：`exec_fillable_rank_neg1`
+- 训练目标解释：若某只股票在 `t+1` 开盘已经涨停、理论上买不进去，则它在训练目标中直接压到 `-1`；其余可成交样本再按当日截面收益排序后映射到 `[-1, 1]`
 - 训练样本过滤：仅训练阶段剔除 `abs(raw target) > 10%`
 - 交易口径：`t` 日收盘后选股，`t+1` 开盘买入，`t+2` 开盘卖出
 - 评估方式：横截面 `top1`
+- 严格成交评估：若选中的股票在 `t+1` 开盘已经涨停，则该日实际收益按 `0` 计，不再把这类名字当成可实现收益
 - 数据切分：`5y train + 1y valid + 1y holdout`
 - 特征：固定纯日频价量特征，不在日常训练流程里随意改动
 - 禁用项：不保留 `recent4y/recent3y/recent2y`、regime gate、inference-side cap 等旧实验分支
 
+这套主线的研究交接说明见 [docs/execution_aware_control_handoff_2026-03-26.md](./docs/execution_aware_control_handoff_2026-03-26.md)。
+
 ## 精确复现补充
 
-如果你的目标不是“迁移同一套策略”，而是“把 full reproduction 做到和参考结果逐项完全一致”，还需要满足一组更严格的实现约束。
+如果你的目标不是“迁移当前主线”，而是“复现更早的研究阶段结果”，还需要满足一组更严格的实现约束。
 
 - 补充说明见 `docs/champion_reproducibility_appendix.md`
 - 这份附录专门记录 handoff 方案里没有完全显式写出的细节
@@ -38,7 +42,9 @@
 - `configs/default.yaml`
   - 默认配置文件，已带注释
 - `docs/champion_reproducibility_appendix.md`
-  - 冠军方案 exact reproduction 附录，记录随机种子、loss 聚合、AMP/dtype 等隐含约束
+  - 旧 `2026-03-23 champion` 方案的 exact reproduction 附录，作为历史材料保留
+- `docs/execution_aware_control_handoff_2026-03-26.md`
+  - 当前主线的 handoff 文档，说明为什么默认实现已从旧 champion 切到 execution-aware control
 - `src/quant_impl/cli.py`
   - 所有主命令入口
 - `artifacts/logs/`
@@ -179,7 +185,7 @@ npm install
 
 ## 快速开始
 
-默认配置已经直接切到 champion 主线，不需要再从实验脚本挑 variant。
+默认配置已经直接切到当前 execution-aware control 主线，不需要再从实验脚本挑 variant。
 
 ### 0. 先下载数据
 
@@ -222,9 +228,10 @@ PYTHONPATH=src python -m quant_impl.cli train  --device mps --deploy-only
 默认训练含义：
 
 - member config: `lc96`
-- target transform: `rank_center`
+- target transform: `exec_fillable_rank_neg1`
 - train-only target cap: `10%`
 - temporal mode: `full5y`
+- strict executable eval: `t+1` 开盘已涨停则当日实现收益记为 `0`
 
 ### 3. 生成最新预测
 
@@ -491,12 +498,14 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
 - 指标文件：`artifacts/metrics/*_training.json`
 - 日志文件：`artifacts/logs/train.log`
 
-训练产物会额外写入 champion 快照：
+训练产物会额外写入主线协议快照：
 
 - `member_config = lc96`
-- `target_transform = rank_center`
+- `target_transform = exec_fillable_rank_neg1`
 - `train_target_abs_cap = 0.10`
 - `temporal_mode = full5y`
+- `strict_executable_eval = true`
+- `execution_block_rule = t+1_open_at_limit_up=>cash0`
 - `deployment_training_config.epochs = training.deployment_epochs`
 - `deployment_training_config.early_stopping_enabled = false`
 

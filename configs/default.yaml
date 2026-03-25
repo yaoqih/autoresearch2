@@ -159,9 +159,10 @@ download:
   report_file: artifacts/logs/download_report.jsonl
 
 data:
-  # 当前默认主线固定为 2026-03-23 champion：
-  # lc96 + rank_center + train-only abs(target)<=10% + full5y
-  cache_version: champion_20260323_lc96_rank_center_full5y
+  # 当前默认主线固定为 2026-03-26 execution-aware control：
+  # lc96 + exec_fillable_rank_neg1 + strict executable eval
+  # + train-only abs(target)<=10% + full5y
+  cache_version: mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y
 
   # 至少上市多少个交易日后，该股票样本才进入训练。
   min_listed_days: 120
@@ -256,9 +257,11 @@ training:
   temporal_mode: full5y
 
   # 训练目标变换：
-  # 先按当日截面收益从高到低排序，再映射为 [-1, 1] 的 centered rank。
-  # 只影响训练损失，不影响验证、holdout 和最终预测评估。
-  target_transform: rank_center
+  # 先判断 t+1 开盘是否已经涨停、无法买入。
+  # 可买入样本按当日截面收益映射到 [-1, 1] 的 centered rank；
+  # 不可买入样本统一压到 -1，避免模型把“开盘已买不进”的名字学成正样本。
+  # 只影响训练损失，不改变真实回测收益定义。
+  target_transform: exec_fillable_rank_neg1
 
   # 训练样本过滤：
   # 若原始 raw target 的绝对值超过 10%，该样本仅在训练阶段被剔除。
@@ -336,4 +339,4 @@ inference:
   archive_top_n: 10
 
   # 预测方案名称，会写入归档文件。
-  prediction_name: champion_20260323_lc96_rank_center_full5y
+  prediction_name: mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y

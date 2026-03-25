@@ -22,6 +22,9 @@ class TrainPipelineTest(unittest.TestCase):
             self.assertIn("summary", result)
             self.assertTrue(config.model_path.exists())
             self.assertIn("research_score", result["summary"])
+            self.assertIn("cv_holdout_trade_rate", result["summary"])
+            self.assertIn("cv_holdout_block_rate_open_limit", result["summary"])
+            self.assertIn("cv_holdout_ideal_mean_return", result["summary"])
 
     def test_train_pipeline_uses_latest_rolling_window_for_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -14,12 +14,14 @@ from tests.helpers import make_synthetic_market_parquet, make_test_config
 
 
 class ChampionSpecTest(unittest.TestCase):
-    def test_rank_center_transform_matches_handoff(self) -> None:
+    def test_exec_fillable_rank_neg1_transform_pushes_blocked_names_to_floor(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = make_test_config(Path(tmpdir))
+            config.training.target_transform = "exec_fillable_rank_neg1"
             targets = torch.tensor([0.08, 0.01, -0.05], dtype=torch.float32)
-            transformed = transform_training_targets(targets, [3], config.training)
-            expected = torch.tensor([1.0, 0.0, -1.0], dtype=torch.float32)
+            blocked = torch.tensor([0, 1, 0], dtype=torch.uint8)
+            transformed = transform_training_targets(targets, [3], config.training, blocked_flags=blocked)
+            expected = torch.tensor([1.0, -1.0, -1.0], dtype=torch.float32)
             self.assertTrue(torch.allclose(transformed, expected))
 
     def test_make_day_batches_applies_train_only_abs_cap(self) -> None:
@@ -99,6 +101,9 @@ class ChampionSpecTest(unittest.TestCase):
             self.assertLess(summary["cv_holdout_max_drawdown"], -0.25)
             self.assertGreater(summary["recent_holdout_mean_return"], summary["cv_holdout_mean_return"])
             self.assertIn("cv_holdout_ret_dd", summary)
+            self.assertIn("cv_holdout_trade_rate", summary)
+            self.assertIn("cv_holdout_block_rate_open_limit", summary)
+            self.assertIn("cv_holdout_one_word_mean_return", summary)
 
     def test_default_hyperparameters_match_champion_reference(self) -> None:
         config = AppConfig()
@@ -119,9 +124,11 @@ class ChampionSpecTest(unittest.TestCase):
             result = train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
             artifact = torch.load(config.model_path, map_location="cpu", weights_only=False)
             self.assertEqual(result["champion_spec"]["member_config"], "lc96")
-            self.assertEqual(result["champion_spec"]["target_transform"], "rank_center")
+            self.assertEqual(result["champion_spec"]["target_transform"], "exec_fillable_rank_neg1")
             self.assertAlmostEqual(result["champion_spec"]["train_target_abs_cap"], 0.10)
             self.assertTrue(artifact["champion_spec"]["train_target_cap_applies_to_linear_head"])
+            self.assertTrue(artifact["champion_spec"]["strict_executable_eval"])
+            self.assertEqual(artifact["champion_spec"]["execution_block_rule"], "t+1_open_at_limit_up=>cash0")
 
 
 if __name__ == "__main__":

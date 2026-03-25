@@ -137,6 +137,38 @@ def _weighted_merge_reports(reports: list[dict[str, object]], weights: list[floa
     )
 
 
+def _merge_supplemental_daily_reports(
+    reports: list[dict[str, object]],
+    *,
+    daily_key: str,
+    config: AppConfig,
+) -> dict[str, object] | None:
+    rows: list[tuple[str, float, float, float]] = []
+    for report in reports:
+        supplemental = report.get("supplemental") or {}
+        daily = supplemental.get(daily_key)
+        if not daily:
+            continue
+        rows.extend(
+            zip(
+                daily.get("dates", []),
+                daily.get("selected_returns", []),
+                daily.get("universe_returns", []),
+                daily.get("oracle_returns", []),
+            )
+        )
+    rows.sort(key=lambda item: item[0])
+    if not rows:
+        return None
+    return summarize_period(
+        config.data,
+        [row[0] for row in rows],
+        [float(row[1]) for row in rows],
+        [float(row[2]) for row in rows],
+        [float(row[3]) for row in rows],
+    )
+
+
 def _report_log_equity(report: dict[str, object], config: AppConfig) -> float:
     returns = report["daily"]["selected_returns"]
     if not returns:
@@ -212,7 +244,12 @@ def fit_one_window(
             optimizer.zero_grad(set_to_none=True)
             features = batch["features"].to(device)
             raw_targets = batch["targets"].to(device)
-            targets = transform_training_targets(raw_targets, batch["group_sizes"], config.training)
+            targets = transform_training_targets(
+                raw_targets,
+                batch["group_sizes"],
+                config.training,
+                blocked_flags=batch.get("open_limit_day1"),
+            )
             with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=autocast_enabled):
                 outputs = model.forward_components(features)
                 loss, loss_parts = compute_training_loss(
@@ -349,6 +386,10 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
     holdout_reports = [fold["holdout"] for fold in fold_summaries]
     aggregate_valid = _merge_reports(valid_reports, config)
     aggregate_holdout = _merge_reports(holdout_reports, config)
+    aggregate_valid_ideal = _merge_supplemental_daily_reports(valid_reports, daily_key="ideal_daily", config=config)
+    aggregate_holdout_ideal = _merge_supplemental_daily_reports(holdout_reports, daily_key="ideal_daily", config=config)
+    aggregate_valid_one_word = _merge_supplemental_daily_reports(valid_reports, daily_key="one_word_daily", config=config)
+    aggregate_holdout_one_word = _merge_supplemental_daily_reports(holdout_reports, daily_key="one_word_daily", config=config)
 
     holdout_weights = [1.0] * len(holdout_reports)
     recent_window = min(config.training.recent_holdout_folds, len(holdout_weights))
@@ -359,6 +400,10 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
     valid_metrics = aggregate_valid["metrics"]
     holdout_metrics = aggregate_holdout["metrics"]
     recent_metrics = recent_holdout["metrics"]
+    trade_rate_valid = float(np.mean([report.get("trade_rate", 1.0) for report in valid_reports])) if valid_reports else 0.0
+    trade_rate_holdout = float(np.mean([report.get("trade_rate", 1.0) for report in holdout_reports])) if holdout_reports else 0.0
+    block_rate_open = float(np.mean([report.get("block_rate_open_limit", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
+    block_rate_one_word = float(np.mean([report.get("block_rate_one_word", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
     research_score = float(
         np.average(
             [
@@ -382,6 +427,9 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
         "cv_valid_max_drawdown": float(valid_metrics["max_drawdown"]),
         "cv_valid_ret_dd": _report_ret_dd_ratio(aggregate_valid),
         "cv_valid_log_equity": _report_log_equity(aggregate_valid, config),
+        "cv_valid_trade_rate": trade_rate_valid,
+        "cv_valid_ideal_mean_return": float(aggregate_valid_ideal["metrics"]["mean_return"]) if aggregate_valid_ideal else 0.0,
+        "cv_valid_one_word_mean_return": float(aggregate_valid_one_word["metrics"]["mean_return"]) if aggregate_valid_one_word else 0.0,
         "cv_holdout_selection_score": float(holdout_metrics["selection_score"]),
         "cv_holdout_mean_return": float(holdout_metrics["mean_return"]),
         "cv_holdout_mean_alpha": float(holdout_metrics["mean_alpha"]),
@@ -389,6 +437,11 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
         "cv_holdout_max_drawdown": float(holdout_metrics["max_drawdown"]),
         "cv_holdout_ret_dd": _report_ret_dd_ratio(aggregate_holdout),
         "cv_holdout_log_equity": _report_log_equity(aggregate_holdout, config),
+        "cv_holdout_trade_rate": trade_rate_holdout,
+        "cv_holdout_block_rate_open_limit": block_rate_open,
+        "cv_holdout_block_rate_one_word": block_rate_one_word,
+        "cv_holdout_ideal_mean_return": float(aggregate_holdout_ideal["metrics"]["mean_return"]) if aggregate_holdout_ideal else 0.0,
+        "cv_holdout_one_word_mean_return": float(aggregate_holdout_one_word["metrics"]["mean_return"]) if aggregate_holdout_one_word else 0.0,
         "cv_holdout_cumulative_return": float(
             np.exp(_report_log_equity(aggregate_holdout, config)) if holdout_reports else 1.0
         ),
@@ -549,6 +602,8 @@ def train_pipeline(
             "target_transform": runtime_config.training.target_transform,
             "train_target_abs_cap": runtime_config.training.train_target_abs_cap,
             "train_target_cap_applies_to_linear_head": runtime_config.training.train_target_cap_applies_to_linear_head,
+            "strict_executable_eval": True,
+            "execution_block_rule": "t+1_open_at_limit_up=>cash0",
         },
         "feature_names": feature_columns(runtime_config.data),
         "model_config": asdict(runtime_config.model),
