@@ -1,0 +1,122 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import SiteShell from "../components/SiteShell.astro";
+import StatusPill from "../components/StatusPill.astro";
+import StockLink from "../components/StockLink.astro";
+import {
+  formatDisplayDate,
+  formatSignedPercent,
+  loadLatestPrediction,
+  loadPredictionIndex,
+  predictionDetailPath,
+} from "../lib/predictions.mjs";
+
+const latest = await loadLatestPrediction();
+const history = await loadPredictionIndex();
+const recentHistory = history.slice(0, 6);
+const summary = latest?.summary ?? {};
+const validation = latest?.validation ?? null;
+
+function toneClass(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "tone-neutral";
+  }
+  return Number(value) >= 0 ? "tone-positive" : "tone-negative";
+}
+---
+
+<BaseLayout title="Quant Briefing | 今日预测" description="今日预测与历史回顾">
+  <SiteShell
+    title="每日预测简报"
+    subtitle="直接读取本地量化产物，展示当日官方推荐、候选排序，以及回填后的历史偏差与命中情况。"
+  >
+    {
+      latest ? (
+        <div class="hero-grid">
+          <section class="card">
+            <span class="muted-label">{formatDisplayDate(latest.as_of_date)}</span>
+            <StatusPill status={latest.status} />
+            <div class="ticker">
+              <StockLink code={latest.selected?.code ?? latest.selected_code} className="ticker-link" />
+            </div>
+            <p class="score-line">模型分数 {latest.selected?.score?.toFixed(4) ?? latest.selected_score?.toFixed(4)}</p>
+            <p>
+              入场日 {latest.entry_date}，出场日 {latest.exit_date}。如同日重跑，网站只保留这一交易日的官方结果。
+            </p>
+            <p>
+              <a href={predictionDetailPath(latest.as_of_date)}>查看完整候选与验证详情</a>
+            </p>
+          </section>
+
+          <section class="card">
+            <h2>验证摘要</h2>
+            <div class="metrics-grid">
+              <div>
+                <span class="muted-label">命中</span>
+                <p class={`metric-value ${toneClass(summary.hit === null ? null : summary.hit ? 1 : -1)}`}>
+                  {summary.hit === null ? "待验证" : summary.hit ? "是" : "否"}
+                </p>
+                <p class="metric-note">是否获得正收益</p>
+              </div>
+              <div>
+                <span class="muted-label">Alpha</span>
+                <p class={`metric-value ${toneClass(summary.alpha)}`}>{formatSignedPercent(summary.alpha)}</p>
+                <p class="metric-note">相对全市场均值</p>
+              </div>
+              <div>
+                <span class="muted-label">选中收益</span>
+                <p class={`metric-value ${toneClass(summary.selected_return)}`}>
+                  {formatSignedPercent(summary.selected_return)}
+                </p>
+                <p class="metric-note">按 entry/exit 回填</p>
+              </div>
+            </div>
+            {
+              validation ? (
+                <p>
+                  全市场均值 {formatSignedPercent(validation.universe_return)}，当日最优
+                  {formatSignedPercent(validation.oracle_return)}。
+                </p>
+              ) : (
+                <p>该交易日还没有足够的未来标签，所以当前仍显示为待验证。</p>
+              )
+            }
+          </section>
+        </div>
+      ) : (
+        <section class="card empty-state">
+          <h2>还没有可展示的预测</h2>
+          <p>先运行 `predict` 或 `daily`，站点会在下一个请求时直接读到新的 JSON 归档。</p>
+        </section>
+      )
+    }
+
+    <section class="card">
+      <h2>最近六次预测</h2>
+      {
+        recentHistory.length ? (
+          <div class="history-grid">
+            {recentHistory.map((item) => (
+              <article class="card history-card">
+                <div class="history-meta">
+                  <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
+                  <StatusPill status={item.status} />
+                </div>
+                <h3>
+                  <StockLink code={item.selected_code} />
+                </h3>
+                <p class={`metric-value ${toneClass(item.alpha)}`}>{formatSignedPercent(item.alpha)}</p>
+                <p class="metric-note">Alpha / 选中收益 {formatSignedPercent(item.selected_return)}</p>
+                <p class="history-actions">
+                  <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
+                </p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p>历史列表为空。</p>
+        )
+      }
+    </section>
+  </SiteShell>
+</BaseLayout>

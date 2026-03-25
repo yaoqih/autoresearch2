@@ -10,6 +10,8 @@ data/*.parquet
 .venv/
 .pytest_cache/
 node_modules/
+web/dist/
+web/.astro/
 .env
 .env.*
 !.env.example

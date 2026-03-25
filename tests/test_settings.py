@@ -119,6 +119,17 @@ class SettingsTest(unittest.TestCase):
 
             self.assertEqual(getattr(config.training, "deployment_epochs", None), 7)
 
+    def test_prediction_archive_paths(self) -> None:
+        config = load_config()
+
+        self.assertEqual(config.prediction_daily_dir, config.paths.predictions_dir / "daily")
+        self.assertEqual(
+            config.prediction_daily_path("2026-03-24"),
+            config.paths.predictions_dir / "daily" / "2026-03-24.json",
+        )
+        self.assertEqual(config.prediction_index_path, config.paths.predictions_dir / "index.json")
+        self.assertEqual(config.prediction_latest_path, config.paths.predictions_dir / "latest.json")
+
 
 if __name__ == "__main__":
     unittest.main()

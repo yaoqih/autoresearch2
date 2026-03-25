@@ -5,6 +5,13 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:start": "npm --prefix web run start",
+    "web:test": "npm --prefix web run test"
+  },
   "dependencies": {
     "puppeteer-core": "^24.40.0"
   }

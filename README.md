@@ -53,6 +53,8 @@
   - 已归档预测的历史验证
 - `src/quant_impl/pipelines/daily.py`
   - 每日任务总控
+- `web/`
+  - Astro SSR 展示站，直接读取本机 `artifacts/predictions/*.json`
 - `tests/`
   - 单元测试和小型 smoke 测试
 
@@ -131,6 +133,28 @@ macOS 的常见 Chrome 路径是：
 ```bash
 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
 ```
+
+### 4. 安装展示站
+
+展示站是独立的 `web/` 项目，使用 Astro SSR 直接读取本机预测归档。
+
+安装：
+
+```bash
+npm run web:install
+```
+
+或者：
+
+```bash
+cd web
+npm install
+```
+
+要求：
+
+- Node `>=20`
+- 部署机可以直接访问 `artifacts/predictions/`
 
 ## 两种典型使用方式
 
@@ -212,6 +236,9 @@ PYTHONPATH=src python -m quant_impl.cli predict --device cuda:3
 
 - `artifacts/predictions/<archive_id>/prediction.json`
 - `artifacts/predictions/<archive_id>/top_candidates.csv`
+- `artifacts/predictions/daily/YYYY-MM-DD.json`
+- `artifacts/predictions/index.json`
+- `artifacts/predictions/latest.json`
 
 ### 4. 回填历史验证
 
@@ -221,6 +248,9 @@ PYTHONPATH=src python -m quant_impl.cli validate
 
 输出：
 
+- 更新 `artifacts/predictions/daily/YYYY-MM-DD.json`
+- 更新 `artifacts/predictions/index.json`
+- 更新 `artifacts/predictions/latest.json`
 - `artifacts/validation/history.csv`
 
 ### 5. 运行每日流程
@@ -233,6 +263,32 @@ PYTHONPATH=src python -m quant_impl.cli daily --device cuda:3
 
 ```bash
 PYTHONPATH=src python -m quant_impl.cli daily --device cuda:3 --retrain --profile screen
+```
+
+### 6. 启动展示站
+
+开发模式：
+
+```bash
+npm run web:dev
+```
+
+构建：
+
+```bash
+npm run web:build
+```
+
+生产启动：
+
+```bash
+npm run web:start
+```
+
+如果展示站和预测归档不在默认相对路径关系下，可以显式指定：
+
+```bash
+QUANT_PREDICTIONS_DIR=/abs/path/to/artifacts/predictions npm run web:start
 ```
 
 ## CLI 命令说明
@@ -462,6 +518,9 @@ PYTHONPATH=src python -m quant_impl.cli predict --device cuda:3 --as-of-date 202
 输出：
 
 - 预测归档：`artifacts/predictions/<archive_id>/`
+- 网站归档：`artifacts/predictions/daily/YYYY-MM-DD.json`
+- 网站列表：`artifacts/predictions/index.json`
+- 网站最新：`artifacts/predictions/latest.json`
 - 日志文件：`artifacts/logs/predict.log`
 
 ### `validate`
@@ -472,8 +531,11 @@ PYTHONPATH=src python -m quant_impl.cli validate
 
 作用：
 
-- 找到已归档但尚未验证的预测
+- 优先验证 `artifacts/predictions/daily/YYYY-MM-DD.json`
+- 如果只有旧版原始运行归档，会先自动回补成日期归档
 - 用 market bundle 中对应日期的真实标签回填
+- 同步刷新网站索引和最新预测文件
+- 继续维护 `artifacts/validation/history.csv`
 - 默认写 `artifacts/logs/validate.log`
 
 ### `daily`
@@ -505,6 +567,38 @@ PYTHONPATH=src python -m quant_impl.cli daily --device cuda:3
 
 - 主流程：`artifacts/logs/daily.log`
 - 抓数阶段：`artifacts/logs/download.log`
+
+## 展示站
+
+展示站默认读取这些 canonical 文件：
+
+- `artifacts/predictions/latest.json`
+- `artifacts/predictions/index.json`
+- `artifacts/predictions/daily/YYYY-MM-DD.json`
+
+页面：
+
+- `/`
+  - 今日预测
+- `/history`
+  - 历史预测列表
+- `/predictions/YYYY-MM-DD`
+  - 单日详情
+
+特点：
+
+- 不需要数据库
+- 不需要额外同步任务
+- 量化任务更新 JSON 后，下一次页面请求即可看到新结果
+- 如果站点和数据目录不在默认相对位置，用 `QUANT_PREDICTIONS_DIR` 指向真实目录
+
+常用命令：
+
+```bash
+npm run web:test
+npm run web:build
+npm run web:start
+```
 
 ## `download_stock.py` 使用说明
 
@@ -763,13 +857,16 @@ PYTHONPATH=src python -m quant_impl.cli daily --device cuda:3 --retrain --profil
 
 - `artifacts/predictions/<archive_id>/prediction.json`
 - `artifacts/predictions/<archive_id>/top_candidates.csv`
+- `artifacts/predictions/daily/YYYY-MM-DD.json`
+- `artifacts/predictions/index.json`
+- `artifacts/predictions/latest.json`
 
 内容：
 
-- 预测日期
-- 预计入场和出场日期
-- top 候选列表
-- 已选股票
+- 原始运行归档保留每次执行的完整输出
+- `daily/YYYY-MM-DD.json` 是网站的单日真相源
+- `index.json` 是按日期倒序的轻量列表
+- `latest.json` 是最近一个交易日的完整预测详情
 
 ### 验证历史
 
@@ -798,6 +895,14 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 - 预测和验证归档
 - 日志初始化和下载参数透传
 - 下载器的续传/跳过逻辑
+- 展示站数据读取层
+
+展示站单独验证：
+
+```bash
+npm run web:test
+npm run web:build
+```
 
 ## 注意事项
 

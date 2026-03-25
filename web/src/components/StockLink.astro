@@ -1,0 +1,16 @@
+---
+import { buildTonghuashunUrl, displayStockCode } from "../lib/predictions.mjs";
+
+const { code, className = "" } = Astro.props;
+const label = displayStockCode(code);
+const href = buildTonghuashunUrl(code);
+---
+
+<a
+  class={`stock-link ${className}`.trim()}
+  href={href}
+  target="_blank"
+  rel="noopener noreferrer"
+>
+  {label}
+</a>

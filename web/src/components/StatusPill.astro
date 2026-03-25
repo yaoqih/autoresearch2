@@ -1,0 +1,7 @@
+---
+const { status } = Astro.props;
+const label = status === "validated" ? "已验证" : "待验证";
+const tone = status === "validated" ? "validated" : "pending";
+---
+
+<span class={`status-pill ${tone}`}>{label}</span>

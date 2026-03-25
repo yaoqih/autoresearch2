@@ -1,0 +1,20 @@
+---
+const { eyebrow = "Quant Briefing", title, subtitle } = Astro.props;
+---
+
+<div class="page-shell">
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">{eyebrow}</p>
+      <h1>{title}</h1>
+      {subtitle && <p class="lede">{subtitle}</p>}
+    </div>
+    <nav class="site-nav">
+      <a href="/">今日</a>
+      <a href="/history">历史</a>
+    </nav>
+  </header>
+  <main>
+    <slot />
+  </main>
+</div>

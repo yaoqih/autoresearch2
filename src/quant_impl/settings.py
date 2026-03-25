@@ -227,6 +227,21 @@ class AppConfig:
     def validation_history_path(self) -> Path:
         return self.paths.validation_dir / "history.csv"
 
+    @property
+    def prediction_daily_dir(self) -> Path:
+        return self.paths.predictions_dir / "daily"
+
+    def prediction_daily_path(self, as_of_date: str) -> Path:
+        return self.prediction_daily_dir / f"{as_of_date}.json"
+
+    @property
+    def prediction_index_path(self) -> Path:
+        return self.paths.predictions_dir / "index.json"
+
+    @property
+    def prediction_latest_path(self) -> Path:
+        return self.paths.predictions_dir / "latest.json"
+
 
 def _merge_dataclass(instance: Any, payload: dict[str, Any]) -> Any:
     for key, value in payload.items():

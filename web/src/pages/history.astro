@@ -1,0 +1,58 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import SiteShell from "../components/SiteShell.astro";
+import StatusPill from "../components/StatusPill.astro";
+import StockLink from "../components/StockLink.astro";
+import {
+  formatDisplayDate,
+  formatSignedPercent,
+  loadPredictionIndex,
+  predictionDetailPath,
+} from "../lib/predictions.mjs";
+
+const history = await loadPredictionIndex();
+
+function toneClass(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "tone-neutral";
+  }
+  return Number(value) >= 0 ? "tone-positive" : "tone-negative";
+}
+---
+
+<BaseLayout title="Quant Briefing | 历史预测" description="历史预测与验证结果">
+  <SiteShell
+    eyebrow="Prediction Ledger"
+    title="历史预测"
+    subtitle="按交易日倒序展示官方预测、回填收益与 Alpha。点击任意日期可查看候选明细。"
+  >
+    {
+      history.length ? (
+        <div class="history-grid">
+          {history.map((item) => (
+            <article class="card history-card">
+              <div class="history-meta">
+                <span class="muted-label">{formatDisplayDate(item.as_of_date)}</span>
+                <StatusPill status={item.status} />
+              </div>
+              <h3>
+                <StockLink code={item.selected_code} />
+              </h3>
+              <p class={`metric-value ${toneClass(item.alpha)}`}>{formatSignedPercent(item.alpha)}</p>
+              <p class="metric-note">选中收益 {formatSignedPercent(item.selected_return)}</p>
+              <p class="metric-note">入场 {item.entry_date} / 出场 {item.exit_date}</p>
+              <p class="history-actions">
+                <a class="card-link-action" href={predictionDetailPath(item.as_of_date)}>查看详情</a>
+              </p>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <section class="card empty-state">
+          <h2>历史预测为空</h2>
+          <p>一旦写入 `index.json`，这里会自动显示完整时间序列。</p>
+        </section>
+      )
+    }
+  </SiteShell>
+</BaseLayout>
