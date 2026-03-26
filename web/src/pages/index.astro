@@ -41,25 +41,31 @@ function toneClass(value) {
           <section class="card">
             <span class="muted-label">{formatDisplayDate(latest.as_of_date)}</span>
             <StatusPill status={latest.status} />
-            <div class="ticker">
-              <StockLink code={primaryCode} className="ticker-link" />
-            </div>
-            <p class="score-line">
-              {
-                validation
-                  ? execution?.allTop10Blocked
-                    ? "Top10 全部开盘涨停，收益按 0 记"
+              <div class="ticker">
+                <StockLink code={primaryCode} className="ticker-link" />
+              </div>
+              <p class="score-line">
+                {
+                  validation
+                  ? execution?.allFallbackBlocked
+                    ? (execution?.fallbackWindowSize ?? 10) <= 1
+                      ? "Top1 开盘涨停，收益按 0 记"
+                      : `Top${execution?.fallbackWindowSize ?? 10} 全部开盘涨停，收益按 0 记`
                     : `执行分数 ${primaryScore?.toFixed(4) ?? "N/A"}`
                   : `模型分数 ${primaryScore?.toFixed(4) ?? "N/A"}`
-              }
-            </p>
+                }
+              </p>
             <p>
               入场日 {latest.entry_date}，出场日 {latest.exit_date}。如同日重跑，网站只保留这一交易日的官方结果。
             </p>
             {
               validation ? (
-                execution?.allTop10Blocked ? (
-                  <p>模型 Top1 为 <StockLink code={execution?.modelCode} />，但 Top10 全部开盘涨停，因此当天不成交。</p>
+                execution?.allFallbackBlocked ? (
+                  (execution?.fallbackWindowSize ?? 10) <= 1 ? (
+                    <p>模型 Top1 为 <StockLink code={execution?.modelCode} />，且开盘已买不进，因此当天不成交。</p>
+                  ) : (
+                    <p>模型 Top1 为 <StockLink code={execution?.modelCode} />，但 Top{execution?.fallbackWindowSize ?? 10} 全部开盘涨停，因此当天不成交。</p>
+                  )
                 ) : execution?.fallbackApplied ? (
                   <p>模型 Top1 <StockLink code={execution?.modelCode} /> 开盘涨停，实际顺延至 Rank {execution?.executedRank} 的 <StockLink code={primaryCode} />。</p>
                 ) : (
@@ -99,7 +105,7 @@ function toneClass(value) {
               <div>
                 <span class="muted-label">执行排名</span>
                 <p class="metric-value tone-neutral">{validation ? (execution?.executedRank ?? "无") : "待"}</p>
-                <p class="metric-note">Top10 内第一个可交易候选</p>
+                <p class="metric-note">Top{execution?.fallbackWindowSize ?? 10} 内第一个可交易候选</p>
               </div>
             </div>
             {
@@ -148,8 +154,12 @@ function toneClass(value) {
                   <p class={`metric-value ${toneClass(item.selected_return)}`}>{formatSignedPercent(item.selected_return)}</p>
                   <p class="metric-note">Alpha {formatSignedPercent(item.alpha)}</p>
                   {
-                    recentExecution.allTop10Blocked ? (
-                      <p class="execution-note">Top10 全封板，收益按 0 记。</p>
+                    recentExecution.allFallbackBlocked ? (
+                      (recentExecution.fallbackWindowSize ?? 10) <= 1 ? (
+                        <p class="execution-note">Top1 开盘涨停，当天不成交。</p>
+                      ) : (
+                        <p class="execution-note">Top{recentExecution.fallbackWindowSize ?? 10} 全封板，收益按 0 记。</p>
+                      )
                     ) : recentExecution.fallbackApplied ? (
                       <p class="execution-note">模型 Top1 <StockLink code={item.selected_code} /> 顺延至 Rank {recentExecution.executedRank}。</p>
                     ) : (

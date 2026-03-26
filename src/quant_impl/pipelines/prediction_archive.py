@@ -104,6 +104,8 @@ def prediction_index_record(payload: dict[str, Any]) -> dict[str, Any]:
         "executed_code": validation.get("executed_code"),
         "executed_rank": validation.get("executed_rank"),
         "fallback_applied": validation.get("fallback_applied"),
+        "fallback_window_size": validation.get("fallback_window_size"),
+        "all_fallback_blocked": validation.get("all_fallback_blocked"),
         "all_top10_blocked": validation.get("all_top10_blocked"),
         "updated_at": payload.get("updated_at"),
     }

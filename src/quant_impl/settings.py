@@ -189,6 +189,7 @@ class TrainingSettings:
 class InferenceSettings:
     top_k: int = 1
     archive_top_n: int = 10
+    execution_fallback_top_k: int = 1
     prediction_name: str = "mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y"
 
 

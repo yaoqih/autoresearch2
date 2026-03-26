@@ -124,7 +124,7 @@ const latestNav = navSeries.at(-1)?.value ?? null;
   <SiteShell
     eyebrow="Prediction Ledger"
     title="历史预测"
-    subtitle="先看策略收益曲线，再下钻到每一天的实际执行结果与 Top10 回填明细。"
+    subtitle="先看策略收益曲线，再下钻到每一天的实际执行结果与候选回填明细。"
   >
     {
       history.length ? (
@@ -215,7 +215,7 @@ const latestNav = navSeries.at(-1)?.value ?? null;
                 <span class="muted-label">Execution Ledger</span>
                 <h2>逐日记录</h2>
               </div>
-              <p>按交易日倒序展示实际执行结果。若 Top1 开盘涨停，卡片会标出顺延执行。</p>
+              <p>按交易日倒序展示实际执行结果。若 Top1 开盘涨停，卡片会标出顺延执行和回填窗口。</p>
             </div>
             <div class="history-grid">
               {history.map((item) => {
@@ -234,8 +234,12 @@ const latestNav = navSeries.at(-1)?.value ?? null;
                     <p class="metric-note">Alpha {formatSignedPercent(item.alpha)}</p>
                     <p class="metric-note">模型 Top1 <StockLink code={item.selected_code} /></p>
                     {
-                      execution.allTop10Blocked ? (
-                        <p class="execution-note">Top10 全部开盘涨停，当日收益按 0 记。</p>
+                      execution.allFallbackBlocked ? (
+                        (execution.fallbackWindowSize ?? 10) <= 1 ? (
+                          <p class="execution-note">Top1 开盘涨停，当天不成交。</p>
+                        ) : (
+                          <p class="execution-note">Top{execution.fallbackWindowSize ?? 10} 全部开盘涨停，当日收益按 0 记。</p>
+                        )
                       ) : execution.fallbackApplied ? (
                         <p class="execution-note">Top1 开盘涨停，实际顺延至 Rank {execution.executedRank}。</p>
                       ) : (

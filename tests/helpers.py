@@ -51,6 +51,7 @@ def make_test_config(root: Path) -> AppConfig:
     config.training.recent_holdout_folds = 2
 
     config.inference.archive_top_n = 3
+    config.inference.execution_fallback_top_k = 3
     return config
 
 

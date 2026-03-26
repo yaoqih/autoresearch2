@@ -86,16 +86,22 @@ export function executionSummary(item) {
       executedCode: null,
       executedRank: null,
       fallbackApplied: false,
+      fallbackWindowSize: 10,
+      allFallbackBlocked: false,
       allTop10Blocked: false,
     };
   }
   const validation = item.validation ?? item;
+  const fallbackWindowSize = Number(validation.fallback_window_size ?? item.fallback_window_size ?? 10);
+  const allFallbackBlocked = Boolean(validation.all_fallback_blocked ?? item.all_fallback_blocked);
   return {
     modelCode: item.selected?.code ?? item.selected_code ?? null,
     executedCode: validation.executed_code ?? item.executed_code ?? null,
     executedRank: validation.executed_rank ?? item.executed_rank ?? null,
     fallbackApplied: Boolean(validation.fallback_applied ?? item.fallback_applied),
-    allTop10Blocked: Boolean(validation.all_top10_blocked ?? item.all_top10_blocked),
+    fallbackWindowSize,
+    allFallbackBlocked,
+    allTop10Blocked: allFallbackBlocked || Boolean(validation.all_top10_blocked ?? item.all_top10_blocked),
   };
 }
 

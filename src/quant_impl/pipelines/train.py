@@ -249,7 +249,7 @@ def fit_one_window(
                 raw_targets,
                 batch["group_sizes"],
                 config.training,
-                blocked_flags=batch.get("open_limit_day1"),
+                blocked_flags=batch.get("open_limit_day1_hybrid", batch.get("open_limit_day1")),
             )
             with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=autocast_enabled):
                 outputs = model.forward_components(features)

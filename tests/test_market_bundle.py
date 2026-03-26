@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from quant_impl.data.market import (
     _build_single_stock_feature_frame,
@@ -12,6 +13,7 @@ from quant_impl.data.market import (
     build_walk_forward_splits,
     canonicalize_raw_frame,
     load_market_bundle,
+    realized_day_detail_lookup,
 )
 
 from tests.helpers import make_synthetic_market_parquet, make_test_config
@@ -54,10 +56,39 @@ class MarketBundleTest(unittest.TestCase):
             self.assertGreater(bundle["features"].shape[0], 0)
             self.assertEqual(len(bundle["feature_names"]), len(bundle["feature_names"]))
             self.assertIn("open_limit_day1", bundle)
+            self.assertIn("open_limit_day1_current", bundle)
+            self.assertIn("open_limit_day1_exact", bundle)
+            self.assertIn("open_limit_day1_hybrid", bundle)
             self.assertIn("one_word_day1", bundle)
             self.assertEqual(bundle["open_limit_day1"].shape[0], bundle["targets"].shape[0])
+            self.assertEqual(bundle["open_limit_day1_current"].shape[0], bundle["targets"].shape[0])
+            self.assertEqual(bundle["open_limit_day1_exact"].shape[0], bundle["targets"].shape[0])
+            self.assertEqual(bundle["open_limit_day1_hybrid"].shape[0], bundle["targets"].shape[0])
             self.assertEqual(bundle["one_word_day1"].shape[0], bundle["targets"].shape[0])
+            self.assertTrue((bundle["open_limit_day1"] == bundle["open_limit_day1_hybrid"]).all().item())
             self.assertGreaterEqual(len(splits), 1)
+
+    def test_load_market_bundle_rebuilds_legacy_contract_missing_explicit_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            build_market_cache(config, force=True)
+            bundle = load_market_bundle(config)
+
+            legacy_bundle = {
+                key: value
+                for key, value in bundle.items()
+                if key not in {"open_limit_day1_current", "open_limit_day1_exact", "open_limit_day1_hybrid"}
+            }
+            torch.save(legacy_bundle, config.bundle_path)
+
+            rebuilt = load_market_bundle(config)
+
+            self.assertIn("open_limit_day1_current", rebuilt)
+            self.assertIn("open_limit_day1_exact", rebuilt)
+            self.assertIn("open_limit_day1_hybrid", rebuilt)
+            self.assertTrue((rebuilt["open_limit_day1"] == rebuilt["open_limit_day1_hybrid"]).all().item())
 
     def test_limit_up_detection_handles_adjusted_price_series(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -98,14 +129,117 @@ class MarketBundleTest(unittest.TestCase):
                 prev_close = close
             frame = pd.DataFrame(rows)
 
-            features = _build_single_stock_feature_frame("SZ002931", frame, config.data, include_target=True)
-            self.assertIsNotNone(features)
-            as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-06"].iloc[0]
+        features = _build_single_stock_feature_frame("SZ002931", frame, config.data, include_target=True)
+        self.assertIsNotNone(features)
+        as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-06"].iloc[0]
 
-            self.assertEqual(int(as_of_row["open_limit_day1"]), 1)
-            self.assertEqual(int(as_of_row["one_word_day1"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_current"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_exact"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_hybrid"]), 1)
+        self.assertEqual(int(as_of_row["one_word_day1"]), 1)
 
-    def test_open_limit_detection_handles_gap_open_limit_that_breaks_intraday(self) -> None:
+    def test_open_limit_detection_uses_exact_limit_price_for_gap_open(self) -> None:
+        config = make_test_config(Path("."))
+        config.data.min_listed_days = 5
+        dates = pd.bdate_range("2025-11-10", periods=48)
+        closes = [20.0 + i * 0.2 for i in range(len(dates))]
+        custom = {
+            "2026-01-07": (50.00, 50.00, 50.00, 50.00, 0.00, 0.00),
+            "2026-01-08": (54.00, 55.00, 55.00, 52.00, 8.00, 4.00),
+        }
+
+        rows = []
+        for date, fallback_close in zip(dates, closes):
+            date_text = date.strftime("%Y-%m-%d")
+            if date_text in custom:
+                close, open_, high, low, pct_chg, change = custom[date_text]
+            else:
+                close = fallback_close
+                open_ = close
+                high = close
+                low = close
+                change = 0.0 if not rows else close - rows[-1]["close"]
+                prev_close = close - change
+                pct_chg = 0.0 if prev_close == 0 else change / prev_close * 100.0
+            rows.append(
+                {
+                    "date": date,
+                    "open": open_,
+                    "close": close,
+                    "high": high,
+                    "low": low,
+                    "volume": 1000.0,
+                    "amount": 1000.0 * close,
+                    "amplitude": 0.0,
+                    "pct_chg": pct_chg,
+                    "change": change,
+                    "turnover_rate": 1.0,
+                }
+            )
+        frame = pd.DataFrame(rows)
+
+        features = _build_single_stock_feature_frame("SZ002519", frame, config.data, include_target=True)
+        self.assertIsNotNone(features)
+        as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-07"].iloc[0]
+
+        self.assertEqual(int(as_of_row["open_limit_day1"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_current"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_exact"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_hybrid"]), 1)
+        self.assertEqual(int(as_of_row["one_word_day1"]), 0)
+
+    def test_open_limit_detection_current_can_exceed_exact_on_sub_tick_gap(self) -> None:
+        config = make_test_config(Path("."))
+        config.data.min_listed_days = 5
+        dates = pd.bdate_range("2025-11-10", periods=48)
+        closes = [20.0 + i * 0.2 for i in range(len(dates))]
+        custom = {
+            "2026-01-07": (50.00, 50.00, 50.00, 50.00, 0.00, 0.00),
+            "2026-01-08": (54.50, 54.99, 55.00, 53.50, 9.00, 4.50),
+        }
+
+        rows = []
+        for date, fallback_close in zip(dates, closes):
+            date_text = date.strftime("%Y-%m-%d")
+            if date_text in custom:
+                close, open_, high, low, pct_chg, change = custom[date_text]
+            else:
+                close = fallback_close
+                open_ = close
+                high = close
+                low = close
+                change = 0.0 if not rows else close - rows[-1]["close"]
+                prev_close = close - change
+                pct_chg = 0.0 if prev_close == 0 else change / prev_close * 100.0
+            rows.append(
+                {
+                    "date": date,
+                    "open": open_,
+                    "close": close,
+                    "high": high,
+                    "low": low,
+                    "volume": 1000.0,
+                    "amount": 1000.0 * close,
+                    "amplitude": 0.0,
+                    "pct_chg": pct_chg,
+                    "change": change,
+                    "turnover_rate": 1.0,
+                }
+            )
+        frame = pd.DataFrame(rows)
+
+        features = _build_single_stock_feature_frame("SZ002519", frame, config.data, include_target=True)
+        self.assertIsNotNone(features)
+        as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-07"].iloc[0]
+
+        self.assertEqual(int(as_of_row["open_limit_day1"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_current"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_exact"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_hybrid"]), 0)
+        self.assertEqual(int(as_of_row["one_word_day1"]), 0)
+
+    def test_open_limit_detection_does_not_block_sub_limit_gap_high_days(self) -> None:
         config = make_test_config(Path("."))
         config.data.min_listed_days = 5
         dates = pd.bdate_range("2025-11-10", periods=48)
@@ -152,7 +286,10 @@ class MarketBundleTest(unittest.TestCase):
         self.assertIsNotNone(features)
         as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-07"].iloc[0]
 
-        self.assertEqual(int(as_of_row["open_limit_day1"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_current"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_exact"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_hybrid"]), 0)
         self.assertEqual(int(as_of_row["one_word_day1"]), 0)
 
     def test_one_word_limit_detection_handles_sub_10_percent_adjusted_series(self) -> None:
@@ -202,7 +339,32 @@ class MarketBundleTest(unittest.TestCase):
         as_of_row = features.loc[features["date"].dt.strftime("%Y-%m-%d") == "2026-01-27"].iloc[0]
 
         self.assertEqual(int(as_of_row["open_limit_day1"]), 1)
+        self.assertEqual(int(as_of_row["open_limit_day1_current"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_exact"]), 0)
+        self.assertEqual(int(as_of_row["open_limit_day1_hybrid"]), 1)
         self.assertEqual(int(as_of_row["one_word_day1"]), 1)
+
+    def test_realized_day_detail_lookup_exposes_execution_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            build_market_cache(config, force=True)
+            bundle = load_market_bundle(config)
+            detail_map = realized_day_detail_lookup(bundle, bundle["dates"][-5])
+
+            self.assertIsNotNone(detail_map)
+            sample = next(iter(detail_map.values()))
+            self.assertIn("open_limit_day1", sample)
+            self.assertIn("open_limit_day1_current", sample)
+            self.assertIn("open_limit_day1_exact", sample)
+            self.assertIn("open_limit_day1_hybrid", sample)
+            self.assertIn("strict_open_return", sample)
+            self.assertIn("strict_open_return_current", sample)
+            self.assertIn("strict_open_return_exact", sample)
+            self.assertIn("strict_open_return_hybrid", sample)
+            self.assertEqual(sample["open_limit_day1"], sample["open_limit_day1_hybrid"])
+            self.assertEqual(sample["strict_open_return"], sample["strict_open_return_hybrid"])
 
 
 if __name__ == "__main__":

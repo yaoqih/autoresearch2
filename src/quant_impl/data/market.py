@@ -35,8 +35,13 @@ MERGED_COLUMNS = ("code", *BASE_COLUMNS)
 NUMERIC_COLUMNS = tuple(column for column in BASE_COLUMNS if column != "date")
 TARGET_NAME = "open_t_plus_2_vs_open_t_plus_1"
 PRICE_TOL = 0.011
-LIMIT_PCT_TOL = 0.002
-OPEN_LIMIT_SHAPE_SLACK_RATIO = 0.11
+PRICE_TICK_EPS = 0.005
+ONE_WORD_LIMIT_SLACK_RATIO = 0.11
+OPEN_LIMIT_ALIAS_FIELD = "open_limit_day1"
+OPEN_LIMIT_CURRENT_FIELD = "open_limit_day1_current"
+OPEN_LIMIT_EXACT_FIELD = "open_limit_day1_exact"
+OPEN_LIMIT_HYBRID_FIELD = "open_limit_day1_hybrid"
+ONE_WORD_FIELD = "one_word_day1"
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,23 @@ def limit_pct_for_date(code: str, date_str: str) -> float:
     if digits.startswith(("8", "4", "920")) and date_str >= "2021-11-15":
         return 0.30
     return 0.10
+
+
+def limit_price_for_date(code: str, date_str: str, prev_close: float) -> float:
+    return round_half_up(float(prev_close) * (1.0 + limit_pct_for_date(code, date_str)))
+
+
+def is_one_word_bar(
+    open_price: float,
+    high_price: float,
+    low_price: float,
+    close_price: float,
+) -> bool:
+    return (
+        abs(high_price - open_price) <= PRICE_TOL
+        and abs(low_price - open_price) <= PRICE_TOL
+        and abs(close_price - open_price) <= PRICE_TOL
+    )
 
 
 def feature_columns(data_cfg: DataSettings) -> list[str]:
@@ -321,7 +343,9 @@ def _build_single_stock_feature_frame(
     valid_mask &= result[feature_names].notna().all(axis=1)
     if include_target:
         valid_mask &= result[TARGET_NAME].notna()
-        open_limit_day1 = np.zeros(len(result), dtype=np.uint8)
+        open_limit_day1_current = np.zeros(len(result), dtype=np.uint8)
+        open_limit_day1_exact = np.zeros(len(result), dtype=np.uint8)
+        open_limit_day1_hybrid = np.zeros(len(result), dtype=np.uint8)
         one_word_day1 = np.zeros(len(result), dtype=np.uint8)
         day_strings = frame["date"].dt.strftime("%Y-%m-%d").tolist()
         open_values = open_price.to_numpy(dtype=np.float64)
@@ -340,28 +364,45 @@ def _build_single_stock_feature_frame(
             low_at_entry = float(low_values[trade_index])
             close_at_entry = float(close_values[trade_index])
             limit_pct = limit_pct_for_date(code, trade_date)
-            open_gap = open_at_entry / prev_close - 1.0 if prev_close > 0 else float("-inf")
             close_pct_chg = float(pct_chg_values[trade_index])
-            is_open_limit = open_gap >= limit_pct - LIMIT_PCT_TOL
-            if not is_open_limit:
-                shape_threshold = limit_pct * (1.0 - OPEN_LIMIT_SHAPE_SLACK_RATIO)
-                is_open_limit = (
-                    abs(high_at_entry - open_at_entry) <= PRICE_TOL
-                    and close_pct_chg >= shape_threshold
-                )
-            is_one_word = (
-                is_open_limit
-                and abs(high_at_entry - open_at_entry) <= PRICE_TOL
-                and abs(low_at_entry - open_at_entry) <= PRICE_TOL
-                and abs(close_at_entry - open_at_entry) <= PRICE_TOL
+            limit_price = limit_price_for_date(code, trade_date, prev_close) if prev_close > 0 else float("inf")
+            one_word_shape = is_one_word_bar(
+                open_at_entry,
+                high_at_entry,
+                low_at_entry,
+                close_at_entry,
             )
-            open_limit_day1[row_index] = 1 if is_open_limit else 0
+            is_open_limit_current = open_at_entry >= limit_price - PRICE_TOL
+            is_open_limit_exact = open_at_entry >= limit_price - PRICE_TICK_EPS
+            is_open_limit_hybrid = is_open_limit_exact
+            if not is_open_limit_hybrid:
+                # hfq-adjusted series can slightly distort the exact rounded limit price.
+                # Keep a narrow fallback only for one-word bars, instead of treating any
+                # "high ~= open" strong day as untradeable at the open.
+                shape_threshold = limit_pct * (1.0 - ONE_WORD_LIMIT_SLACK_RATIO)
+                is_open_limit_hybrid = one_word_shape and close_pct_chg >= shape_threshold
+            is_one_word = is_open_limit_hybrid and one_word_shape
+            open_limit_day1_current[row_index] = 1 if is_open_limit_current else 0
+            open_limit_day1_exact[row_index] = 1 if is_open_limit_exact else 0
+            open_limit_day1_hybrid[row_index] = 1 if is_open_limit_hybrid else 0
             one_word_day1[row_index] = 1 if is_one_word else 0
-        result["open_limit_day1"] = open_limit_day1
-        result["one_word_day1"] = one_word_day1
+        result[OPEN_LIMIT_ALIAS_FIELD] = open_limit_day1_hybrid
+        result[OPEN_LIMIT_CURRENT_FIELD] = open_limit_day1_current
+        result[OPEN_LIMIT_EXACT_FIELD] = open_limit_day1_exact
+        result[OPEN_LIMIT_HYBRID_FIELD] = open_limit_day1_hybrid
+        result[ONE_WORD_FIELD] = one_word_day1
     columns = ["code", "date", *feature_names]
     if include_target:
-        columns.extend([TARGET_NAME, "open_limit_day1", "one_word_day1"])
+        columns.extend(
+            [
+                TARGET_NAME,
+                OPEN_LIMIT_ALIAS_FIELD,
+                OPEN_LIMIT_CURRENT_FIELD,
+                OPEN_LIMIT_EXACT_FIELD,
+                OPEN_LIMIT_HYBRID_FIELD,
+                ONE_WORD_FIELD,
+            ]
+        )
     return result.loc[valid_mask, columns].reset_index(drop=True)
 
 
@@ -387,7 +428,9 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
     feature_names = feature_columns(config.data)
     feature_blocks: list[np.ndarray] = []
     target_blocks: list[np.ndarray] = []
-    open_limit_blocks: list[np.ndarray] = []
+    open_limit_current_blocks: list[np.ndarray] = []
+    open_limit_exact_blocks: list[np.ndarray] = []
+    open_limit_hybrid_blocks: list[np.ndarray] = []
     one_word_blocks: list[np.ndarray] = []
     date_blocks: list[np.ndarray] = []
     asset_blocks: list[np.ndarray] = []
@@ -408,8 +451,10 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
 
         targets = stock_frame[TARGET_NAME].to_numpy(dtype=np.float32, copy=True)
         np.clip(targets, config.data.target_clip[0], config.data.target_clip[1], out=targets)
-        open_limit_day1 = stock_frame["open_limit_day1"].to_numpy(dtype=np.uint8, copy=True)
-        one_word_day1 = stock_frame["one_word_day1"].to_numpy(dtype=np.uint8, copy=True)
+        open_limit_day1_current = stock_frame[OPEN_LIMIT_CURRENT_FIELD].to_numpy(dtype=np.uint8, copy=True)
+        open_limit_day1_exact = stock_frame[OPEN_LIMIT_EXACT_FIELD].to_numpy(dtype=np.uint8, copy=True)
+        open_limit_day1_hybrid = stock_frame[OPEN_LIMIT_HYBRID_FIELD].to_numpy(dtype=np.uint8, copy=True)
+        one_word_day1 = stock_frame[ONE_WORD_FIELD].to_numpy(dtype=np.uint8, copy=True)
 
         dates = (
             stock_frame["date"]
@@ -419,7 +464,9 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
         )
         feature_blocks.append(features)
         target_blocks.append(targets)
-        open_limit_blocks.append(open_limit_day1)
+        open_limit_current_blocks.append(open_limit_day1_current)
+        open_limit_exact_blocks.append(open_limit_day1_exact)
+        open_limit_hybrid_blocks.append(open_limit_day1_hybrid)
         one_word_blocks.append(one_word_day1)
         date_blocks.append(dates)
         asset_blocks.append(np.full(len(stock_frame), asset_id, dtype=np.int32))
@@ -436,7 +483,9 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
 
     features = np.concatenate(feature_blocks, axis=0)
     targets = np.concatenate(target_blocks, axis=0)
-    open_limit_day1 = np.concatenate(open_limit_blocks, axis=0)
+    open_limit_day1_current = np.concatenate(open_limit_current_blocks, axis=0)
+    open_limit_day1_exact = np.concatenate(open_limit_exact_blocks, axis=0)
+    open_limit_day1_hybrid = np.concatenate(open_limit_hybrid_blocks, axis=0)
     one_word_day1 = np.concatenate(one_word_blocks, axis=0)
     dates = np.concatenate(date_blocks, axis=0)
     asset_ids = np.concatenate(asset_blocks, axis=0)
@@ -444,7 +493,9 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
     order = np.lexsort((asset_ids, dates))
     features = features[order]
     targets = targets[order]
-    open_limit_day1 = open_limit_day1[order]
+    open_limit_day1_current = open_limit_day1_current[order]
+    open_limit_day1_exact = open_limit_day1_exact[order]
+    open_limit_day1_hybrid = open_limit_day1_hybrid[order]
     one_word_day1 = one_word_day1[order]
     dates = dates[order]
     asset_ids = asset_ids[order]
@@ -468,7 +519,9 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
 
     features = features[row_mask]
     targets = targets[row_mask]
-    open_limit_day1 = open_limit_day1[row_mask]
+    open_limit_day1_current = open_limit_day1_current[row_mask]
+    open_limit_day1_exact = open_limit_day1_exact[row_mask]
+    open_limit_day1_hybrid = open_limit_day1_hybrid[row_mask]
     one_word_day1 = one_word_day1[row_mask]
     asset_ids = asset_ids[row_mask]
     counts = np.asarray(valid_counts, dtype=np.int64)
@@ -480,8 +533,11 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
         "feature_names": feature_names,
         "features": torch.tensor(features, dtype=torch.float32),
         "targets": torch.tensor(targets, dtype=torch.float32),
-        "open_limit_day1": torch.tensor(open_limit_day1, dtype=torch.uint8),
-        "one_word_day1": torch.tensor(one_word_day1, dtype=torch.uint8),
+        OPEN_LIMIT_ALIAS_FIELD: torch.tensor(open_limit_day1_hybrid, dtype=torch.uint8),
+        OPEN_LIMIT_CURRENT_FIELD: torch.tensor(open_limit_day1_current, dtype=torch.uint8),
+        OPEN_LIMIT_EXACT_FIELD: torch.tensor(open_limit_day1_exact, dtype=torch.uint8),
+        OPEN_LIMIT_HYBRID_FIELD: torch.tensor(open_limit_day1_hybrid, dtype=torch.uint8),
+        ONE_WORD_FIELD: torch.tensor(one_word_day1, dtype=torch.uint8),
         "asset_ids": torch.tensor(asset_ids, dtype=torch.int32),
         "day_ptr": torch.tensor(day_ptr, dtype=torch.int64),
         "dates": _day_values_to_strings(np.asarray(valid_day_values, dtype=np.int32)),
@@ -522,13 +578,25 @@ def load_market_bundle(config: AppConfig, force: bool = False, limit_stocks: int
         )
         build_market_cache(config, force=True, limit_stocks=limit_stocks)
     bundle = _torch_load(config.bundle_path)
-    if bundle.get("version") != config.data.cache_version or "open_limit_day1" not in bundle or "one_word_day1" not in bundle:
+    required_fields = (
+        OPEN_LIMIT_ALIAS_FIELD,
+        OPEN_LIMIT_CURRENT_FIELD,
+        OPEN_LIMIT_EXACT_FIELD,
+        OPEN_LIMIT_HYBRID_FIELD,
+        ONE_WORD_FIELD,
+    )
+    missing_fields = [field_name for field_name in required_fields if field_name not in bundle]
+    alias_matches_hybrid = (
+        not missing_fields
+        and torch.equal(bundle[OPEN_LIMIT_ALIAS_FIELD], bundle[OPEN_LIMIT_HYBRID_FIELD])
+    )
+    if bundle.get("version") != config.data.cache_version or missing_fields or not alias_matches_hybrid:
         LOGGER.warning(
-            "Bundle contract mismatch bundle_version=%s expected=%s has_open_limit=%s has_one_word=%s, rebuilding",
+            "Bundle contract mismatch bundle_version=%s expected=%s missing_fields=%s alias_matches_hybrid=%s, rebuilding",
             bundle.get("version"),
             config.data.cache_version,
-            "open_limit_day1" in bundle,
-            "one_word_day1" in bundle,
+            missing_fields,
+            alias_matches_hybrid,
         )
         build_market_cache(config, force=True, limit_stocks=limit_stocks)
         bundle = _torch_load(config.bundle_path)
@@ -607,27 +675,57 @@ def get_day_slice(bundle, day_index: int) -> tuple[int, int]:
     return start, end
 
 
+def _slice_execution_flag(
+    bundle,
+    field_name: str,
+    start: int,
+    end: int,
+    *,
+    fallback_field: str | None = None,
+) -> torch.Tensor:
+    values = bundle.get(field_name)
+    if values is None and fallback_field is not None:
+        values = bundle.get(fallback_field)
+    if values is None:
+        return torch.zeros(end - start, dtype=torch.uint8)
+    return values[start:end]
+
+
+def get_day_execution_flags(bundle, day_index: int) -> dict[str, torch.Tensor]:
+    start, end = get_day_slice(bundle, day_index)
+    return {
+        OPEN_LIMIT_ALIAS_FIELD: _slice_execution_flag(
+            bundle,
+            OPEN_LIMIT_ALIAS_FIELD,
+            start,
+            end,
+            fallback_field=OPEN_LIMIT_HYBRID_FIELD,
+        ),
+        OPEN_LIMIT_CURRENT_FIELD: _slice_execution_flag(bundle, OPEN_LIMIT_CURRENT_FIELD, start, end),
+        OPEN_LIMIT_EXACT_FIELD: _slice_execution_flag(bundle, OPEN_LIMIT_EXACT_FIELD, start, end),
+        OPEN_LIMIT_HYBRID_FIELD: _slice_execution_flag(
+            bundle,
+            OPEN_LIMIT_HYBRID_FIELD,
+            start,
+            end,
+            fallback_field=OPEN_LIMIT_ALIAS_FIELD,
+        ),
+        ONE_WORD_FIELD: _slice_execution_flag(bundle, ONE_WORD_FIELD, start, end),
+    }
+
+
 def get_day_data(
     bundle,
     day_index: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     start, end = get_day_slice(bundle, day_index)
-    open_limit = bundle.get("open_limit_day1")
-    one_word = bundle.get("one_word_day1")
-    if open_limit is None:
-        open_limit = torch.zeros(end - start, dtype=torch.uint8)
-    else:
-        open_limit = open_limit[start:end]
-    if one_word is None:
-        one_word = torch.zeros(end - start, dtype=torch.uint8)
-    else:
-        one_word = one_word[start:end]
+    flags = get_day_execution_flags(bundle, day_index)
     return (
         bundle["features"][start:end],
         bundle["targets"][start:end],
         bundle["asset_ids"][start:end],
-        open_limit,
-        one_word,
+        flags[OPEN_LIMIT_ALIAS_FIELD],
+        flags[ONE_WORD_FIELD],
     )
 
 
@@ -712,13 +810,25 @@ def make_day_batches(
         feature_chunks = []
         target_chunks = []
         asset_chunks = []
+        open_limit_current_chunks = []
+        open_limit_exact_chunks = []
+        open_limit_hybrid_chunks = []
         open_limit_chunks = []
         one_word_chunks = []
         group_sizes = []
         dates = []
         kept_day_indices = []
         for day_index in batch_day_indices:
-            features, targets, asset_ids, open_limit_day1, one_word_day1 = get_day_data(bundle, day_index)
+            start_row, end_row = get_day_slice(bundle, day_index)
+            features = bundle["features"][start_row:end_row]
+            targets = bundle["targets"][start_row:end_row]
+            asset_ids = bundle["asset_ids"][start_row:end_row]
+            day_flags = get_day_execution_flags(bundle, day_index)
+            open_limit_day1 = day_flags[OPEN_LIMIT_ALIAS_FIELD]
+            open_limit_day1_current = day_flags[OPEN_LIMIT_CURRENT_FIELD]
+            open_limit_day1_exact = day_flags[OPEN_LIMIT_EXACT_FIELD]
+            open_limit_day1_hybrid = day_flags[OPEN_LIMIT_HYBRID_FIELD]
+            one_word_day1 = day_flags[ONE_WORD_FIELD]
             if target_abs_cap is not None and target_abs_cap > 0:
                 keep_mask = targets.abs() <= float(target_abs_cap)
                 if not bool(keep_mask.all().item()):
@@ -726,12 +836,18 @@ def make_day_batches(
                     targets = targets[keep_mask]
                     asset_ids = asset_ids[keep_mask]
                     open_limit_day1 = open_limit_day1[keep_mask]
+                    open_limit_day1_current = open_limit_day1_current[keep_mask]
+                    open_limit_day1_exact = open_limit_day1_exact[keep_mask]
+                    open_limit_day1_hybrid = open_limit_day1_hybrid[keep_mask]
                     one_word_day1 = one_word_day1[keep_mask]
                 if targets.numel() <= 0:
                     continue
             feature_chunks.append(normalize_cross_section(features.float(), clip_value))
             target_chunks.append(targets.float())
             asset_chunks.append(asset_ids)
+            open_limit_current_chunks.append(open_limit_day1_current)
+            open_limit_exact_chunks.append(open_limit_day1_exact)
+            open_limit_hybrid_chunks.append(open_limit_day1_hybrid)
             open_limit_chunks.append(open_limit_day1)
             one_word_chunks.append(one_word_day1)
             group_sizes.append(int(targets.shape[0]))
@@ -743,8 +859,11 @@ def make_day_batches(
             "features": torch.cat(feature_chunks, dim=0),
             "targets": torch.cat(target_chunks, dim=0),
             "asset_ids": torch.cat(asset_chunks, dim=0),
-            "open_limit_day1": torch.cat(open_limit_chunks, dim=0),
-            "one_word_day1": torch.cat(one_word_chunks, dim=0),
+            OPEN_LIMIT_ALIAS_FIELD: torch.cat(open_limit_chunks, dim=0),
+            OPEN_LIMIT_CURRENT_FIELD: torch.cat(open_limit_current_chunks, dim=0),
+            OPEN_LIMIT_EXACT_FIELD: torch.cat(open_limit_exact_chunks, dim=0),
+            OPEN_LIMIT_HYBRID_FIELD: torch.cat(open_limit_hybrid_chunks, dim=0),
+            ONE_WORD_FIELD: torch.cat(one_word_chunks, dim=0),
             "group_sizes": group_sizes,
             "dates": dates,
             "day_indices": kept_day_indices,
@@ -908,13 +1027,18 @@ def evaluate_ranker(
             batch["group_sizes"],
         )
         predictions = predictions.cpu()
+        open_block_source = (
+            batch[OPEN_LIMIT_HYBRID_FIELD]
+            if OPEN_LIMIT_HYBRID_FIELD in batch
+            else batch[OPEN_LIMIT_ALIAS_FIELD]
+        )
         offset = 0
         for group_size, date in zip(batch["group_sizes"], batch["dates"]):
             next_offset = offset + group_size
             day_scores = predictions[offset:next_offset]
             day_targets = batch["targets"][offset:next_offset]
-            day_open_flags = batch["open_limit_day1"][offset:next_offset].bool()
-            day_one_word_flags = batch["one_word_day1"][offset:next_offset].bool()
+            day_open_flags = open_block_source[offset:next_offset].bool()
+            day_one_word_flags = batch[ONE_WORD_FIELD][offset:next_offset].bool()
             offset = next_offset
 
             k = portfolio_size(group_size, data_cfg, fixed_top_k=top_k or data_cfg.eval_top_k)
@@ -1014,11 +1138,16 @@ def compute_linear_ic_weights(
         if batch is None:
             continue
         features = batch["features"].numpy()
+        blocked_flags = (
+            batch[OPEN_LIMIT_HYBRID_FIELD]
+            if OPEN_LIMIT_HYBRID_FIELD in batch
+            else batch.get(OPEN_LIMIT_ALIAS_FIELD)
+        )
         targets = transform_training_targets(
             batch["targets"],
             batch["group_sizes"],
             training_cfg,
-            blocked_flags=batch.get("open_limit_day1"),
+            blocked_flags=blocked_flags,
         ).numpy()
         centered_targets = targets - targets.mean()
         target_std = centered_targets.std()
@@ -1210,23 +1339,38 @@ def realized_day_detail_lookup(bundle, date_text: str) -> dict[str, dict[str, fl
     day_index = locate_day_index(bundle, date_text)
     if day_index is None:
         return None
-    _, targets, asset_ids, open_limit_day1, one_word_day1 = get_day_data(bundle, day_index)
+    start, end = get_day_slice(bundle, day_index)
+    targets = bundle["targets"][start:end]
+    asset_ids = bundle["asset_ids"][start:end]
+    day_flags = get_day_execution_flags(bundle, day_index)
     detail_map: dict[str, dict[str, float | bool]] = {}
-    for asset_id, target, open_limit, one_word in zip(
+    for asset_id, target, open_limit, open_limit_current, open_limit_exact, open_limit_hybrid, one_word in zip(
         asset_ids.tolist(),
         targets.tolist(),
-        open_limit_day1.tolist(),
-        one_word_day1.tolist(),
+        day_flags[OPEN_LIMIT_ALIAS_FIELD].tolist(),
+        day_flags[OPEN_LIMIT_CURRENT_FIELD].tolist(),
+        day_flags[OPEN_LIMIT_EXACT_FIELD].tolist(),
+        day_flags[OPEN_LIMIT_HYBRID_FIELD].tolist(),
+        day_flags[ONE_WORD_FIELD].tolist(),
     ):
         code = bundle["assets"][int(asset_id)]
         ideal_return = float(target)
         blocked_open = bool(open_limit)
+        blocked_current = bool(open_limit_current)
+        blocked_exact = bool(open_limit_exact)
+        blocked_hybrid = bool(open_limit_hybrid)
         blocked_one_word = bool(one_word)
         detail_map[code] = {
             "ideal_return": ideal_return,
-            "open_limit_day1": blocked_open,
-            "one_word_day1": blocked_one_word,
+            OPEN_LIMIT_ALIAS_FIELD: blocked_open,
+            OPEN_LIMIT_CURRENT_FIELD: blocked_current,
+            OPEN_LIMIT_EXACT_FIELD: blocked_exact,
+            OPEN_LIMIT_HYBRID_FIELD: blocked_hybrid,
+            ONE_WORD_FIELD: blocked_one_word,
             "strict_open_return": 0.0 if blocked_open else ideal_return,
+            "strict_open_return_current": 0.0 if blocked_current else ideal_return,
+            "strict_open_return_exact": 0.0 if blocked_exact else ideal_return,
+            "strict_open_return_hybrid": 0.0 if blocked_hybrid else ideal_return,
             "strict_one_word_return": 0.0 if blocked_one_word else ideal_return,
         }
     return detail_map

@@ -33,7 +33,7 @@ if (!detail) {
   <SiteShell
     eyebrow="Single Day Detail"
     title={detail ? formatDisplayDate(detail.as_of_date) : "预测不存在"}
-    subtitle={detail ? "模型排序和实际执行拆开展示，Top10 每一名都可查看真实收益与可交易状态。" : "没有找到对应日期的 canonical 预测文件。"}
+    subtitle={detail ? "模型排序和实际执行拆开展示，回填窗口内的每一名候选都可查看真实收益与可交易状态。" : "没有找到对应日期的 canonical 预测文件。"}
   >
     {
       detail ? (
@@ -72,7 +72,7 @@ if (!detail) {
               <h2 class="execution-headline">
                 {
                   detail.validation ? (
-                    execution?.allTop10Blocked ? "未成交" : <StockLink code={executedCode} className="ticker-link" />
+                    execution?.allFallbackBlocked ? "未成交" : <StockLink code={executedCode} className="ticker-link" />
                   ) : (
                     "待验证"
                   )
@@ -81,8 +81,10 @@ if (!detail) {
               <p class="score-line">
                 {
                   detail.validation
-                    ? execution?.allTop10Blocked
-                      ? "Top10 全部开盘涨停，收益按 0 记"
+                    ? execution?.allFallbackBlocked
+                      ? (execution?.fallbackWindowSize ?? 10) <= 1
+                        ? "Top1 开盘涨停，收益按 0 记"
+                        : `Top${execution?.fallbackWindowSize ?? 10} 全部开盘涨停，收益按 0 记`
                       : `执行分数 ${executedScore?.toFixed(4) ?? "N/A"}`
                     : "该交易日还没有足够的未来标签，尚未回填执行结果。"
                 }
@@ -109,8 +111,12 @@ if (!detail) {
               </div>
               {
                 detail.validation ? (
-                  execution?.allTop10Blocked ? (
-                    <p class="execution-note">模型 Top1 为 <StockLink code={execution?.modelCode} />，但 Top10 全部开盘涨停，因此当天不成交。</p>
+                  execution?.allFallbackBlocked ? (
+                    (execution?.fallbackWindowSize ?? 10) <= 1 ? (
+                      <p class="execution-note">模型 Top1 为 <StockLink code={execution?.modelCode} />，且开盘已买不进，因此当天不成交。</p>
+                    ) : (
+                      <p class="execution-note">模型 Top1 为 <StockLink code={execution?.modelCode} />，但 Top{execution?.fallbackWindowSize ?? 10} 全部开盘涨停，因此当天不成交。</p>
+                    )
                   ) : execution?.fallbackApplied ? (
                     <p class="execution-note">模型 Top1 <StockLink code={execution?.modelCode} /> 开盘涨停，实际顺延至 Rank {execution?.executedRank} 的 <StockLink code={executedCode} />。</p>
                   ) : (
@@ -126,8 +132,8 @@ if (!detail) {
           <section class="card">
             <div class="section-heading">
               <div>
-                <span class="muted-label">Top10 Audit Trail</span>
-                <h2>Top10 候选回填</h2>
+                <span class="muted-label">Candidate Audit Trail</span>
+                <h2>候选回填</h2>
               </div>
               <p>每行同时给出模型分数、实际收益、理想收益，以及是否因开盘涨停被挡掉。</p>
             </div>

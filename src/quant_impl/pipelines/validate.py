@@ -18,7 +18,7 @@ from quant_impl.utils.io import write_json
 
 
 LOGGER = logging.getLogger(__name__)
-VALIDATION_SCHEMA_VERSION = 2
+VALIDATION_SCHEMA_VERSION = 3
 
 
 def _candidate_validation_payload(
@@ -45,7 +45,7 @@ def _enrich_top_candidates(
     top_candidates: list[dict[str, Any]],
     realized_map: dict[str, dict[str, float | bool]],
     *,
-    max_fallback_rank: int = 10,
+    max_fallback_rank: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     executed_index: int | None = None
@@ -69,6 +69,7 @@ def _enrich_top_candidates(
     executed_candidate = enriched[executed_index] if executed_index is not None else None
     executed_validation = executed_candidate["validation"] if executed_candidate is not None else None
     fallback_window = min(max_fallback_rank, len(top_candidates))
+    all_fallback_blocked = int(executed_index is None and fallback_window > 0)
     return enriched, {
         "executed_code": executed_candidate["code"] if executed_candidate is not None else None,
         "executed_rank": int(executed_candidate["rank"]) if executed_candidate is not None else None,
@@ -84,7 +85,9 @@ def _enrich_top_candidates(
             else 0.0
         ),
         "fallback_applied": int(executed_index is not None and executed_index > 0),
-        "all_top10_blocked": int(executed_index is None and fallback_window > 0),
+        "fallback_window_size": int(fallback_window),
+        "all_fallback_blocked": all_fallback_blocked,
+        "all_top10_blocked": all_fallback_blocked,
     }
 
 
@@ -114,6 +117,7 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
     rows = []
     validated = 0
     pending = 0
+    fallback_top_k = max(1, int(config.inference.execution_fallback_top_k))
     for payload in prediction_files:
         if not payload:
             continue
@@ -138,7 +142,11 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
         ideal_values = [float(item["ideal_return"]) for item in realized_map.values()]
         strict_open_values = [float(item["strict_open_return"]) for item in realized_map.values()]
         top_candidates = list(payload.get("top_candidates") or [])
-        enriched_top_candidates, executed = _enrich_top_candidates(top_candidates, realized_map)
+        enriched_top_candidates, executed = _enrich_top_candidates(
+            top_candidates,
+            realized_map,
+            max_fallback_rank=fallback_top_k,
+        )
         selected = realized_map[selected_code]
         selected_return = float(executed["executed_return"])
         universe_return = float(sum(ideal_values) / len(ideal_values))
@@ -166,6 +174,8 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             "executed_rank": executed["executed_rank"],
             "executed_score": executed["executed_score"],
             "fallback_applied": int(executed["fallback_applied"]),
+            "fallback_window_size": int(executed["fallback_window_size"]),
+            "all_fallback_blocked": int(executed["all_fallback_blocked"]),
             "all_top10_blocked": int(executed["all_top10_blocked"]),
             "schema_version": VALIDATION_SCHEMA_VERSION,
         }

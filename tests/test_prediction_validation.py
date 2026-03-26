@@ -99,6 +99,8 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertIn("tradeable", validated_daily["validation"])
             self.assertIn("executed_code", validated_daily["validation"])
             self.assertIn("executed_rank", validated_daily["validation"])
+            self.assertIn("fallback_window_size", validated_daily["validation"])
+            self.assertIn("all_fallback_blocked", validated_daily["validation"])
             self.assertIn("schema_version", validated_daily["validation"])
             self.assertIn("validation", validated_daily["top_candidates"][0])
             self.assertIn("strict_open_return", validated_daily["top_candidates"][0]["validation"])
@@ -108,6 +110,8 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertEqual(validated_index[0]["alpha"], validated_daily["validation"]["alpha"])
             self.assertIn("executed_code", validated_index[0])
             self.assertIn("executed_rank", validated_index[0])
+            self.assertIn("fallback_window_size", validated_index[0])
+            self.assertIn("all_fallback_blocked", validated_index[0])
             self.assertIn("executed_code", history.columns)
             self.assertIn("executed_rank", history.columns)
             self.assertEqual(len(history), 1)
@@ -202,6 +206,7 @@ class PredictionValidationTest(unittest.TestCase):
             root = Path(tmpdir)
             config = make_test_config(root)
             config.inference.archive_top_n = 10
+            config.inference.execution_fallback_top_k = 10
             make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
             train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
             bundle = load_market_bundle(config)
@@ -227,6 +232,7 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertEqual(validated_daily["validation"]["executed_code"], top2)
             self.assertEqual(validated_daily["validation"]["executed_rank"], 2)
             self.assertEqual(validated_daily["validation"]["fallback_applied"], 1)
+            self.assertEqual(validated_daily["validation"]["fallback_window_size"], 10)
             self.assertAlmostEqual(validated_daily["validation"]["selected_return"], 0.03125, places=8)
             self.assertFalse(validated_daily["top_candidates"][0]["validation"]["executed"])
             self.assertTrue(validated_daily["top_candidates"][1]["validation"]["executed"])
@@ -236,6 +242,7 @@ class PredictionValidationTest(unittest.TestCase):
             root = Path(tmpdir)
             config = make_test_config(root)
             config.inference.archive_top_n = 10
+            config.inference.execution_fallback_top_k = 10
             make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
             train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
             bundle = load_market_bundle(config)
@@ -255,9 +262,42 @@ class PredictionValidationTest(unittest.TestCase):
             validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
             self.assertEqual(validation["validated"], 1)
             self.assertEqual(validated_daily["validation"]["all_top10_blocked"], 1)
+            self.assertEqual(validated_daily["validation"]["all_fallback_blocked"], 1)
+            self.assertEqual(validated_daily["validation"]["fallback_window_size"], 10)
             self.assertEqual(validated_daily["validation"]["selected_return"], 0.0)
             self.assertIsNone(validated_daily["validation"]["executed_code"])
             self.assertEqual(validated_daily["summary"]["selected_return"], 0.0)
+
+    def test_validate_pipeline_honors_configured_fallback_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.inference.archive_top_n = 5
+            config.inference.execution_fallback_top_k = 3
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            as_of_date = bundle["dates"][-5]
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+            realized_map = realized_day_detail_lookup(bundle, as_of_date)
+            self.assertIsNotNone(realized_map)
+            modified_map = {code: dict(values) for code, values in realized_map.items()}
+
+            for item in prediction["top_candidates"][:2]:
+                modified_map[item["code"]]["open_limit_day1"] = True
+                modified_map[item["code"]]["strict_open_return"] = 0.0
+
+            rank3 = prediction["top_candidates"][2]["code"]
+            modified_map[rank3]["open_limit_day1"] = False
+            modified_map[rank3]["strict_open_return"] = 0.0625
+            modified_map[rank3]["ideal_return"] = 0.0625
+
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validate_pipeline(config)
+
+            validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+            self.assertEqual(validated_daily["validation"]["executed_rank"], 3)
+            self.assertEqual(validated_daily["validation"]["fallback_window_size"], 3)
 
     def test_predict_pipeline_uses_local_market_dates_for_recent_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
