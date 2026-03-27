@@ -69,6 +69,10 @@ class TrainPipelineTest(unittest.TestCase):
             self.assertEqual(result["deployment_fit"]["valid_end_index"], 0)
             self.assertEqual(result["deployment_fit"]["best_epoch"], config.training.deployment_epochs)
             self.assertIsNone(result["deployment_fit"]["best_valid_metrics"])
+            self.assertEqual(
+                artifact["deployment_training_config"]["resolved_seed"],
+                config.training.seed + config.training.deployment_seed_offset,
+            )
             self.assertTrue(config.model_path.exists())
             self.assertTrue(artifact["deploy_only"])
             self.assertEqual(artifact["summary"], None)

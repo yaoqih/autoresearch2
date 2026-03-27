@@ -650,8 +650,9 @@ def train_pipeline(
             "valid_end_date": bundle["dates"][-1] if deployment_valid_indices else None,
             "uses_validation": True,
         }
-    deployment_seed = runtime_config.training.seed + len(splits)
+    deployment_seed = runtime_config.training.seed + int(runtime_config.training.deployment_seed_offset)
     seed_everything(deployment_seed)
+    LOGGER.info("Deployment training seed=%s", deployment_seed)
     deployment_model, deployment_fit = fit_one_window(
         bundle,
         runtime_config,
@@ -667,6 +668,7 @@ def train_pipeline(
     deployment_training_config = asdict(runtime_config.training)
     deployment_training_config["epochs"] = runtime_config.training.deployment_epochs
     deployment_training_config["early_stopping_enabled"] = False
+    deployment_training_config["resolved_seed"] = deployment_seed
     artifact = {
         "created_at": utc_timestamp(),
         "profile": profile,

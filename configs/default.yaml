@@ -274,6 +274,11 @@ training:
   # 随机种子。
   seed: 42
 
+  # deploy-only / 单窗部署评估时使用的额外 seed 偏移。
+  # 当前设为 999，用来和 autoresearch 的 single_window_hybrid_deploy_eval 保持一致，
+  # 即最终 deployment seed = 42 + 999 = 1041。
+  deployment_seed_offset: 999
+
   # 最大 epoch 数。
   epochs: 18
 

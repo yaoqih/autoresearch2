@@ -159,6 +159,7 @@ class TrainingSettings:
     train_target_abs_cap: float = 0.10
     train_target_cap_applies_to_linear_head: bool = True
     seed: int = 42
+    deployment_seed_offset: int = 999
     epochs: int = 18
     deployment_epochs: int = 4
     batch_days: int = 20
