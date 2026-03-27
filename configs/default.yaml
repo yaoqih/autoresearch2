@@ -159,10 +159,10 @@ download:
   report_file: artifacts/logs/download_report.jsonl
 
 data:
-  # 当前默认主线固定为 2026-03-26 execution-aware control：
-  # lc96 + exec_fillable_rank_neg1 + strict executable eval
-  # + train-only abs(target)<=10% + full5y
-  cache_version: mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y
+  # 当前默认主线固定为 2026-03-28 hybrid rollover：
+  # lc96 + exec_fillable_rank_neg1 + hybrid Top5 rollover
+  # + train-only abs(target)<=10% + full5y + deployment epoch=4
+  cache_version: mainline_20260328_lc96_exec_fillable_rank_neg1_hybrid_rollover_top5_full5y_ep4
 
   # 至少上市多少个交易日后，该股票样本才进入训练。
   min_listed_days: 120
@@ -338,10 +338,13 @@ inference:
   # 每次归档保存多少个候选。
   archive_top_n: 10
 
-  # 验证与网站回填时，若 Top1 开盘已买不进，则最多在前多少名里顺延。
-  # 当前默认保持 cash0：Top1 若开盘已买不进，则当天不交易。
-  # Top3/Top5 顺延保留为实验选项，因为最近真实窗口里它们对错误封板标签更敏感。
-  execution_fallback_top_k: 1
+  # 验证与网站回填时，若 Top1 按 hybrid 规则买不进，则最多在前多少名里顺延。
+  # 当前默认主线就是 Top5 顺延。
+  execution_fallback_top_k: 5
+
+  # 验证/顺延时采用哪一种“开盘已买不进”定义：
+  # 当前实施仓主线固定使用 hybrid：exact + hfq 一字板补偿。
+  execution_block_mode: hybrid
 
   # 预测方案名称，会写入归档文件。
-  prediction_name: mainline_20260326_lc96_exec_fillable_rank_neg1_control_full5y
+  prediction_name: mainline_20260328_lc96_exec_fillable_rank_neg1_hybrid_rollover_top5_full5y_ep4

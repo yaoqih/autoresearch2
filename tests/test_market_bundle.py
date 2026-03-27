@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import torch
@@ -12,6 +13,7 @@ from quant_impl.data.market import (
     build_market_cache,
     build_walk_forward_splits,
     canonicalize_raw_frame,
+    evaluate_ranker,
     load_market_bundle,
     realized_day_detail_lookup,
 )
@@ -20,6 +22,107 @@ from tests.helpers import make_synthetic_market_parquet, make_test_config
 
 
 class MarketBundleTest(unittest.TestCase):
+    def test_evaluate_ranker_rolls_to_first_fillable_name(self) -> None:
+        class DummyModel:
+            def eval(self):
+                return self
+
+            def forward_components(self, features):
+                size = features.shape[0]
+                return {
+                    "broad_score": torch.zeros(size, dtype=torch.float32),
+                    "linear_score": torch.zeros(size, dtype=torch.float32),
+                    "rerank_latent": torch.zeros(size, 16, dtype=torch.float32),
+                }
+
+        bundle = {
+            "features": torch.tensor([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=torch.float32),
+            "targets": torch.tensor([0.10, 0.03, -0.02], dtype=torch.float32),
+            "asset_ids": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "day_ptr": torch.tensor([0, 3], dtype=torch.int64),
+            "dates": ["2020-01-01"],
+            "open_limit_day1": torch.tensor([1, 0, 0], dtype=torch.uint8),
+            "open_limit_day1_current": torch.tensor([1, 0, 0], dtype=torch.uint8),
+            "open_limit_day1_exact": torch.tensor([1, 0, 0], dtype=torch.uint8),
+            "open_limit_day1_hybrid": torch.tensor([1, 0, 0], dtype=torch.uint8),
+            "one_word_day1": torch.tensor([1, 0, 0], dtype=torch.uint8),
+        }
+        config = make_test_config(Path("."))
+        dummy_model = DummyModel()
+
+        with patch(
+            "quant_impl.modeling.ranker.rerank_shortlist_scores",
+            return_value=(torch.tensor([0.9, 0.8, 0.1], dtype=torch.float32), []),
+        ):
+            report = evaluate_ranker(
+                dummy_model,
+                bundle,
+                config.data,
+                [0],
+                torch.device("cpu"),
+                fallback_top_k=3,
+                batch_days=1,
+            )
+
+        self.assertAlmostEqual(report["metrics"]["mean_return"], 0.03, places=8)
+        self.assertAlmostEqual(report["trade_rate"], 1.0, places=8)
+        self.assertAlmostEqual(report["block_rate_open_limit"], 1.0, places=8)
+        self.assertAlmostEqual(report["all_fallback_blocked_rate"], 0.0, places=8)
+        self.assertAlmostEqual(report["switch_rate"], 1.0, places=8)
+        self.assertAlmostEqual(report["mean_selected_rank_when_traded"], 2.0, places=8)
+        self.assertAlmostEqual(report["supplemental"]["ideal_metrics"]["mean_return"], 0.10, places=8)
+        self.assertEqual(report["execution_fallback_top_k"], 3)
+        self.assertEqual(report["execution_block_mode"], "hybrid")
+
+    def test_evaluate_ranker_returns_cash_when_all_fallback_candidates_blocked(self) -> None:
+        class DummyModel:
+            def eval(self):
+                return self
+
+            def forward_components(self, features):
+                size = features.shape[0]
+                return {
+                    "broad_score": torch.zeros(size, dtype=torch.float32),
+                    "linear_score": torch.zeros(size, dtype=torch.float32),
+                    "rerank_latent": torch.zeros(size, 16, dtype=torch.float32),
+                }
+
+        bundle = {
+            "features": torch.tensor([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=torch.float32),
+            "targets": torch.tensor([0.10, 0.03, -0.02], dtype=torch.float32),
+            "asset_ids": torch.tensor([0, 1, 2], dtype=torch.int32),
+            "day_ptr": torch.tensor([0, 3], dtype=torch.int64),
+            "dates": ["2020-01-01"],
+            "open_limit_day1": torch.tensor([1, 1, 1], dtype=torch.uint8),
+            "open_limit_day1_current": torch.tensor([1, 1, 1], dtype=torch.uint8),
+            "open_limit_day1_exact": torch.tensor([1, 1, 1], dtype=torch.uint8),
+            "open_limit_day1_hybrid": torch.tensor([1, 1, 1], dtype=torch.uint8),
+            "one_word_day1": torch.tensor([1, 1, 1], dtype=torch.uint8),
+        }
+        config = make_test_config(Path("."))
+        dummy_model = DummyModel()
+
+        with patch(
+            "quant_impl.modeling.ranker.rerank_shortlist_scores",
+            return_value=(torch.tensor([0.9, 0.8, 0.1], dtype=torch.float32), []),
+        ):
+            report = evaluate_ranker(
+                dummy_model,
+                bundle,
+                config.data,
+                [0],
+                torch.device("cpu"),
+                fallback_top_k=3,
+                batch_days=1,
+            )
+
+        self.assertAlmostEqual(report["metrics"]["mean_return"], 0.0, places=8)
+        self.assertAlmostEqual(report["trade_rate"], 0.0, places=8)
+        self.assertAlmostEqual(report["block_rate_open_limit"], 1.0, places=8)
+        self.assertAlmostEqual(report["all_fallback_blocked_rate"], 1.0, places=8)
+        self.assertAlmostEqual(report["switch_rate"], 0.0, places=8)
+        self.assertAlmostEqual(report["mean_selected_rank_when_traded"], 0.0, places=8)
+
     def test_canonicalize_raw_frame_handles_amount_and_money_without_duplicate_columns(self) -> None:
         frame = pd.DataFrame(
             {

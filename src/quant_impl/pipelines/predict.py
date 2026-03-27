@@ -85,6 +85,8 @@ def _write_prediction_payload(
         "status": "pending",
         "universe_size": universe_size,
         "top_k": config.inference.top_k,
+        "execution_fallback_top_k": config.inference.execution_fallback_top_k,
+        "execution_block_mode": config.inference.execution_block_mode,
         "top_candidates": records,
         "selected_code": records[0]["code"],
         "selected_score": records[0]["score"],

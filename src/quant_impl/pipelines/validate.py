@@ -18,25 +18,60 @@ from quant_impl.utils.io import write_json
 
 
 LOGGER = logging.getLogger(__name__)
-VALIDATION_SCHEMA_VERSION = 3
+VALIDATION_SCHEMA_VERSION = 4
+
+
+def _canonical_execution_block_mode(mode: str | None) -> str:
+    normalized = str(mode or "hybrid").strip().lower()
+    if normalized == "legacy":
+        return "current"
+    if normalized not in {"current", "exact", "hybrid"}:
+        raise ValueError(f"Unsupported execution_block_mode: {mode}")
+    return normalized
+
+
+def _block_field_name(block_mode: str) -> str:
+    if block_mode == "current":
+        return "open_limit_day1_current"
+    if block_mode == "exact":
+        return "open_limit_day1_exact"
+    return "open_limit_day1_hybrid"
+
+
+def _strict_return_field_name(block_mode: str) -> str:
+    if block_mode == "current":
+        return "strict_open_return_current"
+    if block_mode == "exact":
+        return "strict_open_return_exact"
+    return "strict_open_return_hybrid"
 
 
 def _candidate_validation_payload(
     detail: dict[str, float | bool] | None,
     *,
     executed: bool,
+    block_mode: str,
 ) -> dict[str, Any] | None:
     if detail is None:
         return None
-    open_limit_day1 = bool(detail["open_limit_day1"])
+    selected_block_field = _block_field_name(block_mode)
+    selected_return_field = _strict_return_field_name(block_mode)
+    open_limit_day1 = bool(detail[selected_block_field])
     one_word_day1 = bool(detail["one_word_day1"])
     return {
         "ideal_return": float(detail["ideal_return"]),
-        "strict_open_return": float(detail["strict_open_return"]),
+        "strict_open_return": float(detail[selected_return_field]),
+        "strict_open_return_current": float(detail["strict_open_return_current"]),
+        "strict_open_return_exact": float(detail["strict_open_return_exact"]),
+        "strict_open_return_hybrid": float(detail["strict_open_return_hybrid"]),
         "strict_one_word_return": float(detail["strict_one_word_return"]),
         "open_limit_day1": int(open_limit_day1),
+        "open_limit_day1_current": int(bool(detail["open_limit_day1_current"])),
+        "open_limit_day1_exact": int(bool(detail["open_limit_day1_exact"])),
+        "open_limit_day1_hybrid": int(bool(detail["open_limit_day1_hybrid"])),
         "one_word_day1": int(one_word_day1),
         "tradeable": int(not open_limit_day1),
+        "execution_block_mode": block_mode,
         "executed": bool(executed),
     }
 
@@ -46,14 +81,16 @@ def _enrich_top_candidates(
     realized_map: dict[str, dict[str, float | bool]],
     *,
     max_fallback_rank: int,
+    block_mode: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     executed_index: int | None = None
+    selected_block_field = _block_field_name(block_mode)
 
     for index, candidate in enumerate(top_candidates):
         code = str(candidate["code"])
         detail = realized_map.get(code)
-        tradeable = bool(detail is not None and not bool(detail["open_limit_day1"]))
+        tradeable = bool(detail is not None and not bool(detail[selected_block_field]))
         if executed_index is None and index < max_fallback_rank and tradeable:
             executed_index = index
 
@@ -62,7 +99,11 @@ def _enrich_top_candidates(
         enriched.append(
             {
                 **candidate,
-                "validation": _candidate_validation_payload(detail, executed=index == executed_index),
+                "validation": _candidate_validation_payload(
+                    detail,
+                    executed=index == executed_index,
+                    block_mode=block_mode,
+                ),
             }
         )
 
@@ -118,6 +159,9 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
     validated = 0
     pending = 0
     fallback_top_k = max(1, int(config.inference.execution_fallback_top_k))
+    block_mode = _canonical_execution_block_mode(config.inference.execution_block_mode)
+    selected_block_field = _block_field_name(block_mode)
+    selected_return_field = _strict_return_field_name(block_mode)
     for payload in prediction_files:
         if not payload:
             continue
@@ -140,12 +184,13 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             continue
 
         ideal_values = [float(item["ideal_return"]) for item in realized_map.values()]
-        strict_open_values = [float(item["strict_open_return"]) for item in realized_map.values()]
+        strict_open_values = [float(item[selected_return_field]) for item in realized_map.values()]
         top_candidates = list(payload.get("top_candidates") or [])
         enriched_top_candidates, executed = _enrich_top_candidates(
             top_candidates,
             realized_map,
             max_fallback_rank=fallback_top_k,
+            block_mode=block_mode,
         )
         selected = realized_map[selected_code]
         selected_return = float(executed["executed_return"])
@@ -167,9 +212,14 @@ def validate_pipeline(config: AppConfig) -> dict[str, object]:
             "oracle_ideal_return": float(max(ideal_values)),
             "alpha": alpha,
             "hit": int(selected_return > 0),
-            "open_limit_day1": int(bool(selected["open_limit_day1"])),
+            "open_limit_day1": int(bool(selected[selected_block_field])),
+            "open_limit_day1_current": int(bool(selected["open_limit_day1_current"])),
+            "open_limit_day1_exact": int(bool(selected["open_limit_day1_exact"])),
+            "open_limit_day1_hybrid": int(bool(selected["open_limit_day1_hybrid"])),
             "one_word_day1": int(bool(selected["one_word_day1"])),
-            "tradeable": int(not bool(selected["open_limit_day1"])),
+            "tradeable": int(not bool(selected[selected_block_field])),
+            "execution_block_mode": block_mode,
+            "execution_fallback_top_k": fallback_top_k,
             "executed_code": executed["executed_code"],
             "executed_rank": executed["executed_rank"],
             "executed_score": executed["executed_score"],

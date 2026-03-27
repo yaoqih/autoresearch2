@@ -299,7 +299,7 @@ def fit_one_window(
                 config.data,
                 valid_day_indices,
                 device,
-                top_k=config.inference.top_k,
+                fallback_top_k=config.inference.execution_fallback_top_k,
                 batch_days=config.training.batch_days,
             )
             valid_score = valid_eval["metrics"]["selection_score"]
@@ -405,6 +405,10 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
     trade_rate_holdout = float(np.mean([report.get("trade_rate", 1.0) for report in holdout_reports])) if holdout_reports else 0.0
     block_rate_open = float(np.mean([report.get("block_rate_open_limit", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
     block_rate_one_word = float(np.mean([report.get("block_rate_one_word", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
+    switch_rate_valid = float(np.mean([report.get("switch_rate", 0.0) for report in valid_reports])) if valid_reports else 0.0
+    switch_rate_holdout = float(np.mean([report.get("switch_rate", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
+    all_blocked_rate_valid = float(np.mean([report.get("all_fallback_blocked_rate", 0.0) for report in valid_reports])) if valid_reports else 0.0
+    all_blocked_rate_holdout = float(np.mean([report.get("all_fallback_blocked_rate", 0.0) for report in holdout_reports])) if holdout_reports else 0.0
     research_score = float(
         np.average(
             [
@@ -429,6 +433,8 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
         "cv_valid_ret_dd": _report_ret_dd_ratio(aggregate_valid),
         "cv_valid_log_equity": _report_log_equity(aggregate_valid, config),
         "cv_valid_trade_rate": trade_rate_valid,
+        "cv_valid_switch_rate": switch_rate_valid,
+        "cv_valid_all_fallback_blocked_rate": all_blocked_rate_valid,
         "cv_valid_ideal_mean_return": float(aggregate_valid_ideal["metrics"]["mean_return"]) if aggregate_valid_ideal else 0.0,
         "cv_valid_one_word_mean_return": float(aggregate_valid_one_word["metrics"]["mean_return"]) if aggregate_valid_one_word else 0.0,
         "cv_holdout_selection_score": float(holdout_metrics["selection_score"]),
@@ -439,8 +445,10 @@ def _build_training_summary(config: AppConfig, fold_summaries: list[dict[str, ob
         "cv_holdout_ret_dd": _report_ret_dd_ratio(aggregate_holdout),
         "cv_holdout_log_equity": _report_log_equity(aggregate_holdout, config),
         "cv_holdout_trade_rate": trade_rate_holdout,
+        "cv_holdout_switch_rate": switch_rate_holdout,
         "cv_holdout_block_rate_open_limit": block_rate_open,
         "cv_holdout_block_rate_one_word": block_rate_one_word,
+        "cv_holdout_all_fallback_blocked_rate": all_blocked_rate_holdout,
         "cv_holdout_ideal_mean_return": float(aggregate_holdout_ideal["metrics"]["mean_return"]) if aggregate_holdout_ideal else 0.0,
         "cv_holdout_one_word_mean_return": float(aggregate_holdout_one_word["metrics"]["mean_return"]) if aggregate_holdout_one_word else 0.0,
         "cv_holdout_cumulative_return": float(
@@ -485,11 +493,14 @@ def train_pipeline(
         deployment_lookback_years,
     )
     LOGGER.info(
-        "Champion spec member=%s temporal_mode=%s target_transform=%s train_target_abs_cap=%.4f",
+        "Champion spec member=%s temporal_mode=%s target_transform=%s train_target_abs_cap=%.4f fallback_top_k=%s block_mode=%s deployment_epochs=%s",
         runtime_config.training.member_config,
         runtime_config.training.temporal_mode,
         runtime_config.training.target_transform,
         runtime_config.training.train_target_abs_cap,
+        runtime_config.inference.execution_fallback_top_k,
+        runtime_config.inference.execution_block_mode,
+        runtime_config.training.deployment_epochs,
     )
     build_market_cache(runtime_config, force=force_prepare, limit_stocks=limit_stocks)
     bundle = load_market_bundle(runtime_config, force=False, limit_stocks=limit_stocks)
@@ -544,7 +555,7 @@ def train_pipeline(
                 runtime_config.data,
                 holdout_day_indices,
                 device_obj,
-                top_k=runtime_config.inference.top_k,
+                fallback_top_k=runtime_config.inference.execution_fallback_top_k,
                 batch_days=runtime_config.training.batch_days,
             )
             fold_summaries.append(
@@ -667,7 +678,11 @@ def train_pipeline(
             "train_target_abs_cap": runtime_config.training.train_target_abs_cap,
             "train_target_cap_applies_to_linear_head": runtime_config.training.train_target_cap_applies_to_linear_head,
             "strict_executable_eval": True,
-            "execution_block_rule": "t+1_open_at_limit_up=>cash0",
+            "execution_block_rule": (
+                f"t+1_hybrid_limit=>rollover_top{runtime_config.inference.execution_fallback_top_k}_else_cash"
+            ),
+            "execution_fallback_top_k": runtime_config.inference.execution_fallback_top_k,
+            "execution_block_mode": runtime_config.inference.execution_block_mode,
         },
         "feature_names": feature_columns(runtime_config.data),
         "model_config": asdict(runtime_config.model),

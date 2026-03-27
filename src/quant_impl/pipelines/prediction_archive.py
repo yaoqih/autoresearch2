@@ -72,6 +72,8 @@ def canonical_prediction_payload(
         "status": payload.get("status", "pending"),
         "universe_size": payload.get("universe_size"),
         "top_k": payload.get("top_k"),
+        "execution_fallback_top_k": payload.get("execution_fallback_top_k"),
+        "execution_block_mode": payload.get("execution_block_mode"),
         "selected_code": selected_code,
         "selected_score": selected_score,
         "selected": {
@@ -98,6 +100,8 @@ def prediction_index_record(payload: dict[str, Any]) -> dict[str, Any]:
         "exit_date": payload.get("exit_date"),
         "selected_code": _selected_code(payload),
         "selected_score": _selected_score(payload),
+        "execution_fallback_top_k": payload.get("execution_fallback_top_k"),
+        "execution_block_mode": payload.get("execution_block_mode"),
         "hit": summary.get("hit"),
         "alpha": summary.get("alpha"),
         "selected_return": summary.get("selected_return"),

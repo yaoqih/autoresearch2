@@ -103,6 +103,8 @@ class ChampionSpecTest(unittest.TestCase):
             self.assertIn("cv_holdout_ret_dd", summary)
             self.assertIn("cv_holdout_trade_rate", summary)
             self.assertIn("cv_holdout_block_rate_open_limit", summary)
+            self.assertIn("cv_holdout_switch_rate", summary)
+            self.assertIn("cv_holdout_all_fallback_blocked_rate", summary)
             self.assertIn("cv_holdout_one_word_mean_return", summary)
 
     def test_default_hyperparameters_match_champion_reference(self) -> None:
@@ -128,7 +130,9 @@ class ChampionSpecTest(unittest.TestCase):
             self.assertAlmostEqual(result["champion_spec"]["train_target_abs_cap"], 0.10)
             self.assertTrue(artifact["champion_spec"]["train_target_cap_applies_to_linear_head"])
             self.assertTrue(artifact["champion_spec"]["strict_executable_eval"])
-            self.assertEqual(artifact["champion_spec"]["execution_block_rule"], "t+1_open_at_limit_up=>cash0")
+            self.assertEqual(artifact["champion_spec"]["execution_block_rule"], "t+1_hybrid_limit=>rollover_top3_else_cash")
+            self.assertEqual(artifact["champion_spec"]["execution_fallback_top_k"], 3)
+            self.assertEqual(artifact["champion_spec"]["execution_block_mode"], "hybrid")
 
 
 if __name__ == "__main__":

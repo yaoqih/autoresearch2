@@ -2,9 +2,11 @@
 
 日期：`2026-03-26`
 
+> 更新说明：这份文档保留的是 `2026-03-26` control handoff 背景。`autoresearch2` 当前默认实现已继续收敛到 `hybrid + Top5 rollover + deployment epoch=4`，用于实盘前测试。
+
 ## 1. 当前默认主线
 
-`autoresearch2` 当前同步的默认方案是研究仓库中已经确认的 execution-aware control 主线，而不是更早的 `2026-03-23 champion`。
+`autoresearch2` 当前默认方案保留了本文件的 execution-aware 训练目标，但执行评估已经从单纯 `top1 cash0` 进一步收敛到 `hybrid + Top5 rollover`。
 
 固定配置如下：
 
@@ -12,8 +14,9 @@
 - 时间窗：`full5y`
 - 训练目标：`exec_fillable_rank_neg1`
 - 训练期样本过滤：仅训练阶段剔除 `abs(raw target) > 10%`
-- 交易评估：`top1`
-- 严格成交评估：若 `t+1` 开盘已涨停，则该日实际实现收益按 `0` 计
+- 模型输出：`top1` 排名
+- 执行评估：`hybrid` 判定下的 `Top5 rollover`
+- deployment epoch：`4`
 
 ## 2. 为什么默认主线不再是旧 champion
 
@@ -51,19 +54,21 @@
 
 ## 4. 严格成交评估口径
 
-当前 repo2 中的主评估口径是 strict executable eval。
+当前 repo2 中的默认执行评估口径已经是 `hybrid Top5 rollover`。
 
-对每天的 `top1` 选股：
+对每天的模型 `top1` 选股：
 
 - 理想收益：直接使用该股票的原始标签 `open[t+2] / open[t+1] - 1`
-- 严格实现收益：如果 `t+1` 开盘已涨停，则记为 `0`；否则等于理想收益
+- 实际实现收益：如果 `Top1` 在 `t+1` 按 hybrid 规则买不进，则在前 `5` 名里顺延到第一个可成交标的；若前 `5` 名都买不进，则该日收益记为 `0`
 
 实现里还会额外输出一些辅助指标：
 
 - `trade_rate`
-  有多少天最终选中的股票是真正可买入的
+  有多少天最终找到了可成交标的
 - `block_rate_open_limit`
-  有多少天被 `t+1` 开盘涨停挡住
+  有多少天模型原始 `Top1` 被 hybrid 涨停判定挡住
+- `switch_rate`
+  有多少天实际成交标的不是模型原始 `Top1`
 - `block_rate_one_word`
   有多少天是更强的“一字板”情形
 - `ideal_mean_return`
@@ -89,15 +94,15 @@
 - `src/quant_impl/data/market.py`
   - 增加 `open_limit_day1` / `one_word_day1`
   - 新增 `exec_fillable_rank_neg1`
-  - `top1` 评估切到 strict executable return
+  - walk-forward 评估切到 `hybrid + Top5 rollover`
 - `src/quant_impl/pipelines/train.py`
   - 训练时把 `open_limit_day1` 作为 blocked flag 传入 target transform
-  - summary 增加 trade/block/ideal/one-word 指标
+  - summary 增加 trade/block/switch/ideal/one-word 指标
   - artifact 中固化 `strict_executable_eval=true`
 - `src/quant_impl/pipelines/validate.py`
-  - 历史验证使用 strict executable selected return
+  - 历史验证使用 `hybrid + Top5 rollover` selected return
 - `configs/default.yaml`
-  - 默认主线改为 execution-aware control
+  - 默认主线改为 `hybrid + Top5 rollover`
 - `README.md`
   - 默认说明改为当前主线
 

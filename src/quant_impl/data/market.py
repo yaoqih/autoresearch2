@@ -994,7 +994,7 @@ def evaluate_ranker(
     day_indices: Sequence[int],
     device: torch.device,
     *,
-    top_k: int | None = None,
+    fallback_top_k: int | None = None,
     batch_days: int = 32,
 ):
     from quant_impl.modeling.ranker import rerank_shortlist_scores
@@ -1008,8 +1008,12 @@ def evaluate_ranker(
     ideal_oracle_returns: list[float] = []
     one_word_selected_returns: list[float] = []
     one_word_oracle_returns: list[float] = []
-    open_block_flags: list[bool] = []
+    top1_block_flags: list[bool] = []
     one_word_flags: list[bool] = []
+    all_fallback_blocked_flags: list[bool] = []
+    switch_flags: list[bool] = []
+    selected_ranks: list[int] = []
+    fallback_limit = max(1, int(fallback_top_k or 1))
 
     for batch in make_day_batches(
         bundle,
@@ -1041,28 +1045,21 @@ def evaluate_ranker(
             day_one_word_flags = batch[ONE_WORD_FIELD][offset:next_offset].bool()
             offset = next_offset
 
-            k = portfolio_size(group_size, data_cfg, fixed_top_k=top_k or data_cfg.eval_top_k)
-            if k != 1:
-                weights = build_rank_weights(k, data_cfg.portfolio_rank_decay, device=day_targets.device, dtype=day_targets.dtype)
-                top_indices = torch.topk(day_scores, k=k, largest=True).indices
-                oracle_indices = torch.topk(day_targets, k=k, largest=True).indices
-                selected_return = float((day_targets[top_indices] * weights).sum().item())
-                oracle_return = float((day_targets[oracle_indices] * weights).sum().item())
-                selected_returns.append(selected_return)
-                universe_returns.append(float(day_targets.mean().item()))
-                oracle_returns.append(oracle_return)
-                ideal_selected_returns.append(selected_return)
-                ideal_oracle_returns.append(oracle_return)
-                one_word_selected_returns.append(selected_return)
-                one_word_oracle_returns.append(oracle_return)
-                open_block_flags.append(False)
-                one_word_flags.append(False)
-                dates.append(date)
-                continue
+            ranked_indices = torch.argsort(day_scores, descending=True)
+            top_index = int(ranked_indices[0].item())
+            selected_index: int | None = None
+            selected_rank = 0
+            search_limit = min(group_size, fallback_limit)
+            for rank in range(search_limit):
+                candidate_index = int(ranked_indices[rank].item())
+                if bool(day_open_flags[candidate_index].item()):
+                    continue
+                selected_index = candidate_index
+                selected_rank = rank + 1
+                break
 
-            top_index = int(torch.argmax(day_scores).item())
             selected_return_ideal = float(day_targets[top_index].item())
-            selected_return_open = 0.0 if bool(day_open_flags[top_index].item()) else selected_return_ideal
+            selected_return_open = float(day_targets[selected_index].item()) if selected_index is not None else 0.0
             selected_return_one_word = 0.0 if bool(day_one_word_flags[top_index].item()) else selected_return_ideal
             open_fillable_mask = ~day_open_flags
             one_word_fillable_mask = ~day_one_word_flags
@@ -1085,8 +1082,11 @@ def evaluate_ranker(
             ideal_oracle_returns.append(oracle_ideal_return)
             one_word_selected_returns.append(selected_return_one_word)
             one_word_oracle_returns.append(oracle_one_word_return)
-            open_block_flags.append(bool(day_open_flags[top_index].item()))
+            top1_block_flags.append(bool(day_open_flags[top_index].item()))
             one_word_flags.append(bool(day_one_word_flags[top_index].item()))
+            all_fallback_blocked_flags.append(selected_index is None)
+            switch_flags.append(selected_rank > 1)
+            selected_ranks.append(selected_rank)
             dates.append(date)
 
     primary_report = summarize_period(data_cfg, dates, selected_returns, universe_returns, oracle_returns)
@@ -1098,9 +1098,20 @@ def evaluate_ranker(
         universe_returns,
         one_word_oracle_returns,
     )
-    primary_report["trade_rate"] = 1.0 - float(np.mean(open_block_flags)) if open_block_flags else 1.0
-    primary_report["block_rate_open_limit"] = float(np.mean(open_block_flags)) if open_block_flags else 0.0
+    traded_ranks = [rank for rank in selected_ranks if rank > 0]
+    primary_report["trade_rate"] = 1.0 - float(np.mean(all_fallback_blocked_flags)) if all_fallback_blocked_flags else 1.0
+    primary_report["block_rate_open_limit"] = float(np.mean(top1_block_flags)) if top1_block_flags else 0.0
     primary_report["block_rate_one_word"] = float(np.mean(one_word_flags)) if one_word_flags else 0.0
+    primary_report["all_fallback_blocked_rate"] = (
+        float(np.mean(all_fallback_blocked_flags)) if all_fallback_blocked_flags else 0.0
+    )
+    primary_report["switch_rate"] = float(np.mean(switch_flags)) if switch_flags else 0.0
+    primary_report["mean_selected_rank_when_traded"] = (
+        float(np.mean(traded_ranks)) if traded_ranks else 0.0
+    )
+    primary_report["mean_selected_rank_all_days"] = float(np.mean(selected_ranks)) if selected_ranks else 0.0
+    primary_report["execution_fallback_top_k"] = int(fallback_limit)
+    primary_report["execution_block_mode"] = "hybrid"
     primary_report["supplemental"] = {
         "ideal_metrics": ideal_report["metrics"],
         "one_word_metrics": one_word_report["metrics"],

@@ -102,10 +102,17 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertIn("fallback_window_size", validated_daily["validation"])
             self.assertIn("all_fallback_blocked", validated_daily["validation"])
             self.assertIn("schema_version", validated_daily["validation"])
+            self.assertIn("execution_block_mode", validated_daily["validation"])
+            self.assertIn("execution_fallback_top_k", validated_daily["validation"])
             self.assertIn("validation", validated_daily["top_candidates"][0])
             self.assertIn("strict_open_return", validated_daily["top_candidates"][0]["validation"])
+            self.assertIn("strict_open_return_current", validated_daily["top_candidates"][0]["validation"])
+            self.assertIn("strict_open_return_exact", validated_daily["top_candidates"][0]["validation"])
+            self.assertIn("strict_open_return_hybrid", validated_daily["top_candidates"][0]["validation"])
             self.assertIn("tradeable", validated_daily["top_candidates"][0]["validation"])
             self.assertIn("executed", validated_daily["top_candidates"][0]["validation"])
+            self.assertEqual(validated_daily["validation"]["execution_block_mode"], "hybrid")
+            self.assertEqual(validated_daily["validation"]["execution_fallback_top_k"], 3)
             self.assertEqual(validated_index[0]["status"], "validated")
             self.assertEqual(validated_index[0]["alpha"], validated_daily["validation"]["alpha"])
             self.assertIn("executed_code", validated_index[0])
@@ -220,8 +227,12 @@ class PredictionValidationTest(unittest.TestCase):
             modified_map = {code: dict(values) for code, values in realized_map.items()}
             modified_map[top1]["open_limit_day1"] = True
             modified_map[top1]["strict_open_return"] = 0.0
+            modified_map[top1]["open_limit_day1_hybrid"] = True
+            modified_map[top1]["strict_open_return_hybrid"] = 0.0
             modified_map[top2]["open_limit_day1"] = False
             modified_map[top2]["strict_open_return"] = 0.03125
+            modified_map[top2]["open_limit_day1_hybrid"] = False
+            modified_map[top2]["strict_open_return_hybrid"] = 0.03125
             modified_map[top2]["ideal_return"] = 0.03125
 
             with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
@@ -255,6 +266,8 @@ class PredictionValidationTest(unittest.TestCase):
             for item in prediction["top_candidates"]:
                 modified_map[item["code"]]["open_limit_day1"] = True
                 modified_map[item["code"]]["strict_open_return"] = 0.0
+                modified_map[item["code"]]["open_limit_day1_hybrid"] = True
+                modified_map[item["code"]]["strict_open_return_hybrid"] = 0.0
 
             with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
                 validation = validate_pipeline(config)
@@ -286,10 +299,14 @@ class PredictionValidationTest(unittest.TestCase):
             for item in prediction["top_candidates"][:2]:
                 modified_map[item["code"]]["open_limit_day1"] = True
                 modified_map[item["code"]]["strict_open_return"] = 0.0
+                modified_map[item["code"]]["open_limit_day1_hybrid"] = True
+                modified_map[item["code"]]["strict_open_return_hybrid"] = 0.0
 
             rank3 = prediction["top_candidates"][2]["code"]
             modified_map[rank3]["open_limit_day1"] = False
             modified_map[rank3]["strict_open_return"] = 0.0625
+            modified_map[rank3]["open_limit_day1_hybrid"] = False
+            modified_map[rank3]["strict_open_return_hybrid"] = 0.0625
             modified_map[rank3]["ideal_return"] = 0.0625
 
             with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
@@ -298,6 +315,70 @@ class PredictionValidationTest(unittest.TestCase):
             validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
             self.assertEqual(validated_daily["validation"]["executed_rank"], 3)
             self.assertEqual(validated_daily["validation"]["fallback_window_size"], 3)
+
+    def test_validate_pipeline_can_switch_execution_block_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.inference.archive_top_n = 3
+            config.inference.execution_fallback_top_k = 3
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            as_of_date = bundle["dates"][-5]
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+            realized_map = realized_day_detail_lookup(bundle, as_of_date)
+            self.assertIsNotNone(realized_map)
+
+            top1 = prediction["top_candidates"][0]["code"]
+            top2 = prediction["top_candidates"][1]["code"]
+            modified_map = {code: dict(values) for code, values in realized_map.items()}
+
+            modified_map[top1]["ideal_return"] = 0.0875
+            modified_map[top1]["open_limit_day1_current"] = True
+            modified_map[top1]["strict_open_return_current"] = 0.0
+            modified_map[top1]["open_limit_day1_hybrid"] = False
+            modified_map[top1]["strict_open_return_hybrid"] = 0.0875
+            modified_map[top1]["open_limit_day1_exact"] = False
+            modified_map[top1]["strict_open_return_exact"] = 0.0875
+            modified_map[top1]["open_limit_day1"] = False
+            modified_map[top1]["strict_open_return"] = 0.0875
+
+            modified_map[top2]["ideal_return"] = 0.03125
+            modified_map[top2]["open_limit_day1_current"] = False
+            modified_map[top2]["strict_open_return_current"] = 0.03125
+            modified_map[top2]["open_limit_day1_hybrid"] = False
+            modified_map[top2]["strict_open_return_hybrid"] = 0.03125
+            modified_map[top2]["open_limit_day1_exact"] = False
+            modified_map[top2]["strict_open_return_exact"] = 0.03125
+            modified_map[top2]["open_limit_day1"] = False
+            modified_map[top2]["strict_open_return"] = 0.03125
+
+            config.inference.execution_block_mode = "current"
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validate_pipeline(config)
+            current_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+
+            self.assertEqual(current_daily["validation"]["execution_block_mode"], "current")
+            self.assertEqual(current_daily["validation"]["executed_code"], top2)
+            self.assertEqual(current_daily["validation"]["executed_rank"], 2)
+            self.assertAlmostEqual(current_daily["validation"]["selected_return"], 0.03125, places=8)
+            self.assertEqual(current_daily["validation"]["open_limit_day1"], 1)
+            self.assertEqual(current_daily["validation"]["open_limit_day1_current"], 1)
+            self.assertEqual(current_daily["validation"]["open_limit_day1_hybrid"], 0)
+
+            config.inference.execution_block_mode = "hybrid"
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validate_pipeline(config)
+            hybrid_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+
+            self.assertEqual(hybrid_daily["validation"]["execution_block_mode"], "hybrid")
+            self.assertEqual(hybrid_daily["validation"]["executed_code"], top1)
+            self.assertEqual(hybrid_daily["validation"]["executed_rank"], 1)
+            self.assertAlmostEqual(hybrid_daily["validation"]["selected_return"], 0.0875, places=8)
+            self.assertEqual(hybrid_daily["validation"]["open_limit_day1"], 0)
+            self.assertEqual(hybrid_daily["validation"]["open_limit_day1_current"], 1)
+            self.assertEqual(hybrid_daily["validation"]["open_limit_day1_hybrid"], 0)
 
     def test_predict_pipeline_uses_local_market_dates_for_recent_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

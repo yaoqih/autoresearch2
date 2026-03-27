@@ -43,8 +43,8 @@ class TrainPipelineTest(unittest.TestCase):
             self.assertEqual(deployment_fit["train_end_index"], deployment_valid_start)
             self.assertEqual(deployment_fit["valid_start_index"], deployment_valid_start)
             self.assertEqual(deployment_fit["valid_end_index"], len(bundle["dates"]))
-            self.assertEqual(len(deployment_fit["history"]), 5)
-            self.assertEqual(artifact["deployment_training_config"]["epochs"], 5)
+            self.assertEqual(len(deployment_fit["history"]), 4)
+            self.assertEqual(artifact["deployment_training_config"]["epochs"], 4)
             self.assertFalse(artifact["deployment_training_config"]["early_stopping_enabled"])
 
     def test_train_pipeline_deploy_only_skips_cross_validation(self) -> None:
@@ -61,7 +61,7 @@ class TrainPipelineTest(unittest.TestCase):
             self.assertEqual(result["folds"], [])
             self.assertIsNone(result["summary"])
             self.assertTrue(result["deploy_only"])
-            self.assertEqual(len(result["deployment_fit"]["history"]), 5)
+            self.assertEqual(len(result["deployment_fit"]["history"]), 4)
             self.assertEqual(result["deployment_fit"]["train_start_index"], expected_train_start)
             self.assertEqual(result["deployment_fit"]["train_end_index"], len(bundle["dates"]))
             self.assertEqual(result["deployment_fit"]["valid_days"], 0)

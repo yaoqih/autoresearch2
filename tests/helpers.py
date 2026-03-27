@@ -45,6 +45,7 @@ def make_test_config(root: Path) -> AppConfig:
     config.model.rerank_mix = 0.25
 
     config.training.epochs = 2
+    config.training.deployment_epochs = 4
     config.training.batch_days = 5
     config.training.early_stopping_patience = 2
     config.training.pair_samples_per_day = 8
