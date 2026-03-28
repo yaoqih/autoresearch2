@@ -159,10 +159,11 @@ download:
   report_file: artifacts/logs/download_report.jsonl
 
 data:
-  # 当前默认主线固定为 2026-03-28 hybrid rollover：
-  # lc96 + exec_fillable_rank_neg1 + hybrid Top5 rollover
-  # + train-only abs(target)<=10% + full5y + deployment epoch=4
-  cache_version: mainline_20260328_lc96_exec_fillable_rank_neg1_hybrid_rollover_top5_full5y_ep4
+  # 当前默认主线固定为 2026-03-29 baseline：
+  # lc96 + exec_fillable_rank_neg1 + blocked_pairwise(w=0.10)
+  # + hybrid Top5 rollover + train-only abs(target)<=10%
+  # + full5y + deployment epoch=4
+  cache_version: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4
 
   # 至少上市多少个交易日后，该股票样本才进入训练。
   min_listed_days: 120
@@ -263,6 +264,13 @@ training:
   # 只影响训练损失，不改变真实回测收益定义。
   target_transform: exec_fillable_rank_neg1
 
+  # baseline 辅助项：
+  # 额外惩罚“blocked 票的打分高于最优 fillable 票”的情况，
+  # 用来减少模型把买不到的极端票顶到最前面。
+  execution_aux_mode: blocked_pairwise
+  execution_aux_weight: 0.10
+  execution_aux_top_fraction: 0.10
+
   # 训练样本过滤：
   # 若原始 raw target 的绝对值超过 10%，该样本仅在训练阶段被剔除。
   # 推理、验证和 holdout 不做这层过滤。
@@ -352,4 +360,4 @@ inference:
   execution_block_mode: hybrid
 
   # 预测方案名称，会写入归档文件。
-  prediction_name: mainline_20260328_lc96_exec_fillable_rank_neg1_hybrid_rollover_top5_full5y_ep4
+  prediction_name: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4

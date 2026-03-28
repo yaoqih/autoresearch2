@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from quant_impl.data.market import make_day_batches, transform_training_targets
+from quant_impl.modeling.ranker import blocked_top_fillable_pairwise_loss
 from quant_impl.pipelines.train import _build_training_summary, train_pipeline
 from quant_impl.settings import AppConfig
 
@@ -53,6 +54,19 @@ class ChampionSpecTest(unittest.TestCase):
         self.assertEqual(batch["group_sizes"], [2, 1])
         self.assertEqual(batch["day_indices"], [0, 1])
         self.assertTrue(bool((batch["targets"].abs() <= 0.10).all().item()))
+
+    def test_blocked_pairwise_auxiliary_penalizes_blocked_names_outranking_fillable_names(self) -> None:
+        scores = torch.tensor([0.9, 0.2, 0.8, 0.1], dtype=torch.float32)
+        raw_targets = torch.tensor([0.01, 0.08, 0.06, -0.02], dtype=torch.float32)
+        blocked = torch.tensor([1, 0, 0, 0], dtype=torch.uint8)
+        loss = blocked_top_fillable_pairwise_loss(
+            scores,
+            raw_targets,
+            [4],
+            blocked,
+            top_fraction=0.10,
+        )
+        self.assertGreater(float(loss.item()), 0.0)
 
     def test_training_summary_matches_reference_style_aggregation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -117,6 +131,11 @@ class ChampionSpecTest(unittest.TestCase):
         self.assertAlmostEqual(config.training.top_bucket_expansion_scale, 10.0)
         self.assertAlmostEqual(config.training.listwise_loss_weight, 0.51)
         self.assertAlmostEqual(config.training.rerank_listwise_loss_weight, 0.06)
+        self.assertEqual(config.training.execution_aux_mode, "blocked_pairwise")
+        self.assertAlmostEqual(config.training.execution_aux_weight, 0.10)
+        self.assertAlmostEqual(config.training.execution_aux_top_fraction, 0.10)
+        self.assertIn("blockpair_w0p10", config.data.cache_version)
+        self.assertIn("blockpair_w0p10", config.inference.prediction_name)
 
     def test_train_pipeline_persists_champion_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,6 +146,8 @@ class ChampionSpecTest(unittest.TestCase):
             artifact = torch.load(config.model_path, map_location="cpu", weights_only=False)
             self.assertEqual(result["champion_spec"]["member_config"], "lc96")
             self.assertEqual(result["champion_spec"]["target_transform"], "exec_fillable_rank_neg1")
+            self.assertEqual(result["champion_spec"]["execution_aux_mode"], "blocked_pairwise")
+            self.assertAlmostEqual(result["champion_spec"]["execution_aux_weight"], 0.10)
             self.assertAlmostEqual(result["champion_spec"]["train_target_abs_cap"], 0.10)
             self.assertTrue(artifact["champion_spec"]["train_target_cap_applies_to_linear_head"])
             self.assertTrue(artifact["champion_spec"]["strict_executable_eval"])

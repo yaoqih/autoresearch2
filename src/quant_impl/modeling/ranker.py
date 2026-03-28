@@ -458,6 +458,45 @@ def weighted_huber_day_loss(
     return weighted_mean_tensors(losses, weights, predictions.device)
 
 
+def blocked_top_fillable_pairwise_loss(
+    scores: torch.Tensor,
+    raw_targets: torch.Tensor,
+    group_sizes: list[int],
+    blocked_flags: torch.Tensor,
+    *,
+    top_fraction: float,
+) -> torch.Tensor:
+    losses: list[torch.Tensor] = []
+    offset = 0
+    for group_size in group_sizes:
+        next_offset = offset + group_size
+        day_scores = scores[offset:next_offset]
+        day_targets = raw_targets[offset:next_offset]
+        day_blocked = blocked_flags[offset:next_offset].bool()
+        offset = next_offset
+
+        fillable_mask = ~day_blocked
+        if not bool(fillable_mask.any().item()) or not bool(day_blocked.any().item()):
+            continue
+
+        fillable_targets = day_targets[fillable_mask]
+        fillable_scores = day_scores[fillable_mask]
+        blocked_scores = day_scores[day_blocked]
+        fillable_count = int(fillable_targets.numel())
+        top_count = max(1, min(fillable_count, int(round(fillable_count * float(top_fraction)))))
+        top_order = torch.argsort(fillable_targets, descending=True)
+        top_scores = fillable_scores[top_order[:top_count]]
+        if top_scores.numel() == 0 or blocked_scores.numel() == 0:
+            continue
+
+        pair_margin = top_scores[:, None] - blocked_scores[None, :]
+        losses.append(F.softplus(-pair_margin).mean())
+
+    if not losses:
+        return scores.new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def binary_top_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
@@ -776,6 +815,9 @@ def compute_training_loss(
     model_cfg: ModelSettings,
     data_cfg: DataSettings,
     training_cfg: TrainingSettings,
+    *,
+    raw_targets: torch.Tensor | None = None,
+    blocked_flags: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     smoothed_targets = smooth_targets(targets, training_cfg.label_smoothing)
     broad_score = predictions["broad_score"]
@@ -831,6 +873,19 @@ def compute_training_loss(
         data_cfg,
         training_cfg,
     )
+    aux = broad_score.new_zeros(())
+    if (
+        str(training_cfg.execution_aux_mode).lower() == "blocked_pairwise"
+        and raw_targets is not None
+        and blocked_flags is not None
+    ):
+        aux = blocked_top_fillable_pairwise_loss(
+            final_score,
+            raw_targets,
+            group_sizes,
+            blocked_flags,
+            top_fraction=float(training_cfg.execution_aux_top_fraction),
+        )
     total = (
         training_cfg.listwise_loss_weight * listwise
         + training_cfg.pairwise_loss_weight * pairwise
@@ -838,6 +893,7 @@ def compute_training_loss(
         + training_cfg.binary_loss_weight * binary
         + training_cfg.winner_loss_weight * winner
         + training_cfg.rerank_listwise_loss_weight * rerank_listwise
+        + float(training_cfg.execution_aux_weight) * aux
     )
     return total, {
         "listwise": listwise.detach(),
@@ -846,4 +902,5 @@ def compute_training_loss(
         "binary": binary.detach(),
         "winner": winner.detach(),
         "rerank_listwise": rerank_listwise.detach(),
+        "aux": aux.detach(),
     }

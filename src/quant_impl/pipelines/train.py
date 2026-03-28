@@ -245,11 +245,14 @@ def fit_one_window(
             optimizer.zero_grad(set_to_none=True)
             features = batch["features"].to(device)
             raw_targets = batch["targets"].to(device)
+            blocked_flags = batch.get("open_limit_day1_hybrid", batch.get("open_limit_day1"))
+            if blocked_flags is not None:
+                blocked_flags = blocked_flags.to(device)
             targets = transform_training_targets(
                 raw_targets,
                 batch["group_sizes"],
                 config.training,
-                blocked_flags=batch.get("open_limit_day1_hybrid", batch.get("open_limit_day1")),
+                blocked_flags=blocked_flags,
             )
             with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=autocast_enabled):
                 outputs = model.forward_components(features)
@@ -261,6 +264,8 @@ def fit_one_window(
                     config.model,
                     config.data,
                     config.training,
+                    raw_targets=raw_targets,
+                    blocked_flags=blocked_flags,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -276,6 +281,7 @@ def fit_one_window(
                     "binary": float(loss_parts["binary"].detach().cpu().item()),
                     "winner": float(loss_parts["winner"].detach().cpu().item()),
                     "rerank_listwise": float(loss_parts["rerank_listwise"].detach().cpu().item()),
+                    "aux": float(loss_parts["aux"].detach().cpu().item()),
                 }
             )
 
@@ -288,6 +294,7 @@ def fit_one_window(
             "train_binary_loss": float(np.mean([item["binary"] for item in epoch_losses])) if epoch_losses else 0.0,
             "train_winner_loss": float(np.mean([item["winner"] for item in epoch_losses])) if epoch_losses else 0.0,
             "train_rerank_listwise_loss": float(np.mean([item["rerank_listwise"] for item in epoch_losses])) if epoch_losses else 0.0,
+            "train_aux_loss": float(np.mean([item["aux"] for item in epoch_losses])) if epoch_losses else 0.0,
             "valid_selection_score": None,
             "valid_mean_return": None,
             "valid_mean_alpha": None,
@@ -677,6 +684,9 @@ def train_pipeline(
             "member_config": runtime_config.training.member_config,
             "temporal_mode": runtime_config.training.temporal_mode,
             "target_transform": runtime_config.training.target_transform,
+            "execution_aux_mode": runtime_config.training.execution_aux_mode,
+            "execution_aux_weight": runtime_config.training.execution_aux_weight,
+            "execution_aux_top_fraction": runtime_config.training.execution_aux_top_fraction,
             "train_target_abs_cap": runtime_config.training.train_target_abs_cap,
             "train_target_cap_applies_to_linear_head": runtime_config.training.train_target_cap_applies_to_linear_head,
             "strict_executable_eval": True,
