@@ -411,6 +411,15 @@ def _day_values_to_strings(day_values: np.ndarray) -> list[str]:
     return [np.datetime_as_string(value, unit="D") for value in date_values]
 
 
+def _normalize_limit_stocks(limit_stocks: int | None) -> int | None:
+    if limit_stocks is None:
+        return None
+    normalized = int(limit_stocks)
+    if normalized <= 0:
+        raise ValueError(f"limit_stocks must be positive, got {limit_stocks}")
+    return normalized
+
+
 def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int | None = None) -> Path:
     config.paths.ensure()
     if config.bundle_path.exists() and not force:
@@ -418,11 +427,13 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
         return config.bundle_path
 
     merged_path = resolve_merged_path(config)
+    requested_limit_stocks = _normalize_limit_stocks(limit_stocks)
+    source_num_row_groups = int(pq.ParquetFile(merged_path).num_row_groups)
     LOGGER.info(
         "Building market bundle merged_path=%s bundle_path=%s limit_stocks=%s force=%s",
         merged_path,
         config.bundle_path,
-        limit_stocks,
+        requested_limit_stocks,
         force,
     )
     feature_names = feature_columns(config.data)
@@ -437,7 +448,7 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
     asset_codes: list[str] = []
 
     processed_assets = 0
-    for index, total, code, frame in _iter_stock_frames(merged_path, limit_stocks=limit_stocks):
+    for index, total, code, frame in _iter_stock_frames(merged_path, limit_stocks=requested_limit_stocks):
         stock_frame = _build_single_stock_feature_frame(code, frame, config.data, include_target=True)
         if stock_frame is None or stock_frame.empty:
             continue
@@ -544,6 +555,8 @@ def build_market_cache(config: AppConfig, force: bool = False, limit_stocks: int
         "assets": asset_codes,
         "config": {
             "merged_parquet_path": str(merged_path),
+            "requested_limit_stocks": requested_limit_stocks,
+            "source_num_row_groups": source_num_row_groups,
             **asdict(config.data),
         },
     }
@@ -570,13 +583,14 @@ def _torch_load(path: Path):
 
 
 def load_market_bundle(config: AppConfig, force: bool = False, limit_stocks: int | None = None):
+    requested_limit_stocks = _normalize_limit_stocks(limit_stocks)
     if force or not config.bundle_path.exists():
         LOGGER.info(
             "Loading bundle requires rebuild force=%s bundle_exists=%s",
             force,
             config.bundle_path.exists(),
         )
-        build_market_cache(config, force=True, limit_stocks=limit_stocks)
+        build_market_cache(config, force=True, limit_stocks=requested_limit_stocks)
     bundle = _torch_load(config.bundle_path)
     required_fields = (
         OPEN_LIMIT_ALIAS_FIELD,
@@ -590,15 +604,38 @@ def load_market_bundle(config: AppConfig, force: bool = False, limit_stocks: int
         not missing_fields
         and torch.equal(bundle[OPEN_LIMIT_ALIAS_FIELD], bundle[OPEN_LIMIT_HYBRID_FIELD])
     )
-    if bundle.get("version") != config.data.cache_version or missing_fields or not alias_matches_hybrid:
-        LOGGER.warning(
-            "Bundle contract mismatch bundle_version=%s expected=%s missing_fields=%s alias_matches_hybrid=%s, rebuilding",
-            bundle.get("version"),
-            config.data.cache_version,
-            missing_fields,
-            alias_matches_hybrid,
+    bundle_config = bundle.get("config") or {}
+    contract_reasons: list[str] = []
+    if bundle.get("version") != config.data.cache_version:
+        contract_reasons.append(
+            f"bundle_version={bundle.get('version')} expected={config.data.cache_version}"
         )
-        build_market_cache(config, force=True, limit_stocks=limit_stocks)
+    if missing_fields:
+        contract_reasons.append(f"missing_fields={missing_fields}")
+    if not alias_matches_hybrid:
+        contract_reasons.append("alias_matches_hybrid=false")
+    if "requested_limit_stocks" not in bundle_config:
+        contract_reasons.append("missing_requested_limit_stocks")
+    else:
+        cached_limit_stocks = bundle_config.get("requested_limit_stocks")
+        if cached_limit_stocks is not None:
+            cached_limit_stocks = int(cached_limit_stocks)
+        if cached_limit_stocks != requested_limit_stocks:
+            contract_reasons.append(
+                f"requested_limit_stocks={cached_limit_stocks} expected_limit_stocks={requested_limit_stocks}"
+            )
+    expected_merged_path = str(resolve_merged_path(config))
+    cached_merged_path = bundle_config.get("merged_parquet_path")
+    if cached_merged_path != expected_merged_path:
+        contract_reasons.append(
+            f"merged_parquet_path={cached_merged_path} expected_merged_path={expected_merged_path}"
+        )
+    if contract_reasons:
+        LOGGER.warning(
+            "Bundle contract mismatch reasons=%s, rebuilding",
+            contract_reasons,
+        )
+        build_market_cache(config, force=True, limit_stocks=requested_limit_stocks)
         bundle = _torch_load(config.bundle_path)
     LOGGER.info(
         "Loaded market bundle path=%s assets=%s days=%s rows=%s",
@@ -624,6 +661,8 @@ def get_bundle_summary(bundle) -> dict[str, object]:
         "start_date": bundle["dates"][0],
         "end_date": bundle["dates"][-1],
         "mean_assets_per_day": mean_assets_per_day,
+        "requested_limit_stocks": (bundle.get("config") or {}).get("requested_limit_stocks"),
+        "source_num_row_groups": (bundle.get("config") or {}).get("source_num_row_groups"),
     }
 
 

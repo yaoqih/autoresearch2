@@ -193,6 +193,42 @@ class MarketBundleTest(unittest.TestCase):
             self.assertIn("open_limit_day1_hybrid", rebuilt)
             self.assertTrue((rebuilt["open_limit_day1"] == rebuilt["open_limit_day1_hybrid"]).all().item())
 
+    def test_load_market_bundle_rebuilds_when_limit_stocks_contract_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+
+            build_market_cache(config, force=True, limit_stocks=4)
+            limited_bundle = load_market_bundle(config, limit_stocks=4)
+            full_bundle = load_market_bundle(config, limit_stocks=None)
+
+            self.assertEqual(len(limited_bundle["assets"]), 4)
+            self.assertEqual(limited_bundle["config"]["requested_limit_stocks"], 4)
+            self.assertEqual(len(full_bundle["assets"]), 6)
+            self.assertIsNone(full_bundle["config"]["requested_limit_stocks"])
+
+    def test_load_market_bundle_rebuilds_legacy_bundle_missing_limit_contract_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=6, num_days=70)
+            build_market_cache(config, force=True)
+            bundle = load_market_bundle(config)
+
+            legacy_bundle = dict(bundle)
+            legacy_bundle["config"] = {
+                key: value
+                for key, value in bundle["config"].items()
+                if key != "requested_limit_stocks"
+            }
+            torch.save(legacy_bundle, config.bundle_path)
+
+            rebuilt = load_market_bundle(config, limit_stocks=None)
+
+            self.assertIn("requested_limit_stocks", rebuilt["config"])
+            self.assertIsNone(rebuilt["config"]["requested_limit_stocks"])
+
     def test_limit_up_detection_handles_adjusted_price_series(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
