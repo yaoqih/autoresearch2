@@ -541,7 +541,7 @@ PYTHONPATH=src python -m quant_impl.cli train --profile full --device cuda:3
 - `train_target_abs_cap = 0.10`
 - `temporal_mode = full5y`
 - `strict_executable_eval = true`
-- `execution_block_rule = t+1_hybrid_limit=>rollover_top10_else_cash`
+- `execution_block_rule = t+1_hybrid_limit=>rollover_top5_else_cash`
 - `deployment_training_config.epochs = training.deployment_epochs`
 - `deployment_training_config.early_stopping_enabled = false`
 

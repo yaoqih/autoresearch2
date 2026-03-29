@@ -161,9 +161,9 @@ download:
 data:
   # 当前默认主线固定为 2026-03-29 baseline：
   # lc96 + exec_fillable_rank_neg1 + blocked_pairwise(w=0.10)
-  # + hybrid Top10 rollover + train-only abs(target)<=10%
+  # + hybrid Top5 rollover + train-only abs(target)<=10%
   # + full5y + deployment epoch=4
-  cache_version: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top10_full5y_ep4
+  cache_version: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4
 
   # 至少上市多少个交易日后，该股票样本才进入训练。
   min_listed_days: 120
@@ -352,12 +352,12 @@ inference:
   archive_top_n: 10
 
   # 验证与网站回填时，若 Top1 按 hybrid 规则买不进，则最多在前多少名里顺延。
-  # 当前默认主线就是 Top10 顺延。
-  execution_fallback_top_k: 10
+  # 当前默认主线就是 Top5 顺延。
+  execution_fallback_top_k: 5
 
   # 验证/顺延时采用哪一种“开盘已买不进”定义：
   # 当前实施仓主线固定使用 hybrid：exact + hfq 一字板补偿。
   execution_block_mode: hybrid
 
   # 预测方案名称，会写入归档文件。
-  prediction_name: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top10_full5y_ep4
+  prediction_name: mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4

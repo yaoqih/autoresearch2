@@ -98,7 +98,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(config.download.max_retries, 2)
         self.assertEqual(config.download.request_interval, 0.0)
         self.assertEqual(config.download.request_jitter, 0.0)
-        self.assertEqual(config.inference.execution_fallback_top_k, 10)
+        self.assertEqual(config.inference.execution_fallback_top_k, 5)
 
     def test_load_config_reads_deployment_epochs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
