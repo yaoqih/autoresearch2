@@ -101,7 +101,7 @@ class DownloadSettings:
 
 @dataclass
 class DataSettings:
-    cache_version: str = "mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4"
+    cache_version: str = "mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top10_full5y_ep4"
     min_listed_days: int = 120
     min_daily_universe: int = 100
     target_clip: tuple[float, float] = (-0.25, 0.25)
@@ -193,9 +193,9 @@ class TrainingSettings:
 class InferenceSettings:
     top_k: int = 1
     archive_top_n: int = 10
-    execution_fallback_top_k: int = 5
+    execution_fallback_top_k: int = 10
     execution_block_mode: str = "hybrid"
-    prediction_name: str = "mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top5_full5y_ep4"
+    prediction_name: str = "mainline_20260329_lc96_exec_fillable_rank_neg1_blockpair_w0p10_hybrid_rollover_top10_full5y_ep4"
 
 
 @dataclass

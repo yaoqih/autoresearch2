@@ -94,6 +94,7 @@ export function executionSummary(item) {
   const validation = item.validation ?? item;
   const fallbackWindowSize = Number(validation.fallback_window_size ?? item.fallback_window_size ?? 10);
   const allFallbackBlocked = Boolean(validation.all_fallback_blocked ?? item.all_fallback_blocked);
+  const rawAllTop10Blocked = validation.all_top10_blocked ?? item.all_top10_blocked;
   return {
     modelCode: item.selected?.code ?? item.selected_code ?? null,
     executedCode: validation.executed_code ?? item.executed_code ?? null,
@@ -101,7 +102,7 @@ export function executionSummary(item) {
     fallbackApplied: Boolean(validation.fallback_applied ?? item.fallback_applied),
     fallbackWindowSize,
     allFallbackBlocked,
-    allTop10Blocked: allFallbackBlocked || Boolean(validation.all_top10_blocked ?? item.all_top10_blocked),
+    allTop10Blocked: rawAllTop10Blocked === undefined ? allFallbackBlocked : Boolean(rawAllTop10Blocked),
   };
 }
 

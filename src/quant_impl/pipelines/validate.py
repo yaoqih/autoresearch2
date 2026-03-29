@@ -86,11 +86,13 @@ def _enrich_top_candidates(
     enriched: list[dict[str, Any]] = []
     executed_index: int | None = None
     selected_block_field = _block_field_name(block_mode)
+    tradeable_flags: list[bool] = []
 
     for index, candidate in enumerate(top_candidates):
         code = str(candidate["code"])
         detail = realized_map.get(code)
         tradeable = bool(detail is not None and not bool(detail[selected_block_field]))
+        tradeable_flags.append(tradeable)
         if executed_index is None and index < max_fallback_rank and tradeable:
             executed_index = index
 
@@ -110,7 +112,9 @@ def _enrich_top_candidates(
     executed_candidate = enriched[executed_index] if executed_index is not None else None
     executed_validation = executed_candidate["validation"] if executed_candidate is not None else None
     fallback_window = min(max_fallback_rank, len(top_candidates))
+    top10_window = min(10, len(top_candidates))
     all_fallback_blocked = int(executed_index is None and fallback_window > 0)
+    all_top10_blocked = int(top10_window > 0 and not any(tradeable_flags[:top10_window]))
     return enriched, {
         "executed_code": executed_candidate["code"] if executed_candidate is not None else None,
         "executed_rank": int(executed_candidate["rank"]) if executed_candidate is not None else None,
@@ -128,7 +132,7 @@ def _enrich_top_candidates(
         "fallback_applied": int(executed_index is not None and executed_index > 0),
         "fallback_window_size": int(fallback_window),
         "all_fallback_blocked": all_fallback_blocked,
-        "all_top10_blocked": all_fallback_blocked,
+        "all_top10_blocked": all_top10_blocked,
     }
 
 

@@ -380,6 +380,41 @@ class PredictionValidationTest(unittest.TestCase):
             self.assertEqual(hybrid_daily["validation"]["open_limit_day1_current"], 1)
             self.assertEqual(hybrid_daily["validation"]["open_limit_day1_hybrid"], 0)
 
+    def test_validate_pipeline_distinguishes_top10_blocked_from_fallback_window_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = make_test_config(root)
+            config.inference.archive_top_n = 10
+            config.inference.execution_fallback_top_k = 1
+            make_synthetic_market_parquet(config.paths.merged_parquet, num_assets=12, num_days=70)
+            train_pipeline(config, device="cpu", profile="screen", force_prepare=True)
+            bundle = load_market_bundle(config)
+            as_of_date = bundle["dates"][-5]
+            prediction = predict_pipeline(config, device="cpu", as_of_date=as_of_date)
+            realized_map = realized_day_detail_lookup(bundle, as_of_date)
+            self.assertIsNotNone(realized_map)
+            top_candidates = prediction["top_candidates"]
+            top1 = top_candidates[0]["code"]
+            top2 = top_candidates[1]["code"]
+            modified_map = {code: dict(values) for code, values in realized_map.items()}
+            modified_map[top1]["open_limit_day1"] = True
+            modified_map[top1]["strict_open_return"] = 0.0
+            modified_map[top1]["open_limit_day1_hybrid"] = True
+            modified_map[top1]["strict_open_return_hybrid"] = 0.0
+            modified_map[top2]["open_limit_day1"] = False
+            modified_map[top2]["strict_open_return"] = 0.03125
+            modified_map[top2]["open_limit_day1_hybrid"] = False
+            modified_map[top2]["strict_open_return_hybrid"] = 0.03125
+            modified_map[top2]["ideal_return"] = 0.03125
+
+            with patch("quant_impl.pipelines.validate.realized_day_detail_lookup", return_value=modified_map):
+                validate_pipeline(config)
+
+            validated_daily = read_json(config.paths.predictions_dir / "daily" / f"{as_of_date}.json")
+            self.assertEqual(validated_daily["validation"]["all_fallback_blocked"], 1)
+            self.assertEqual(validated_daily["validation"]["all_top10_blocked"], 0)
+            self.assertIsNone(validated_daily["validation"]["executed_code"])
+
     def test_predict_pipeline_uses_local_market_dates_for_recent_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

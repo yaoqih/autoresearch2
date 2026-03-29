@@ -10,6 +10,7 @@ import {
   buildTonghuashunUrl,
   displayPrimaryCode,
   displayStockCode,
+  executionSummary,
   loadLatestPrediction,
   loadPredictionDetail,
   loadPredictionIndex,
@@ -169,4 +170,18 @@ test("prefers executed code and builds chronological performance series", () => 
       ["2026-03-24", 1.02],
     ],
   );
+});
+
+test("keeps top10 blocked separate from fallback window blocked in execution summary", () => {
+  const summary = executionSummary({
+    selected_code: "SZ000001",
+    validation: {
+      fallback_window_size: 1,
+      all_fallback_blocked: 1,
+      all_top10_blocked: 0,
+    },
+  });
+
+  assert.equal(summary.allFallbackBlocked, true);
+  assert.equal(summary.allTop10Blocked, false);
 });
